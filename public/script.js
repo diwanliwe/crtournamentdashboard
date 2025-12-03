@@ -140,7 +140,7 @@ async function fetchTournament(tag, cardIndex) {
             console.log(`[Q${cardIndex + 1}] ${data.name}: ${data.membersList}/${data.maxCapacity} players`);
             updateCard(cardIndex, data);
         } else {
-            updateCardError(cardIndex, data.error || 'Unknown error');
+            updateCardError(cardIndex, data.detail || data.error || 'Unknown error');
         }
     } catch (error) {
         console.error(`Error fetching tournament ${tag}:`, error);
@@ -241,49 +241,21 @@ async function analyzeTourn(tag, cardIndex) {
     
     // Show loading state in results area
     analysisResults.style.display = 'block';
-    tierBarsContainer.innerHTML = '<div class="analysis-loading">Starting analysis...</div>';
+    tierBarsContainer.innerHTML = '<div class="analysis-loading">Analyzing players... This may take a while for large tournaments.</div>';
     analysisResults.querySelector('.analysis-time').textContent = '';
 
     const cleanTag = tag.replace(/^#/, '');
-    
-    // Start polling for progress (every 500ms for responsive UI)
-    let progressInterval = setInterval(async () => {
-        try {
-            const progressResp = await fetch(`/api/analysis/progress/${cleanTag}`);
-            if (progressResp.ok) {
-                const progress = await progressResp.json();
-                if (progress.status === 'running') {
-                    const percent = Math.round((progress.processed / progress.total) * 100);
-                    const errorText = progress.errors > 0 ? `, ${progress.errors} errors` : '';
-                    tierBarsContainer.innerHTML = `
-                        <div class="analysis-loading">
-                            <div class="progress-text">Analyzing players: ${progress.processed}/${progress.total} (${percent}%)</div>
-                            <div class="progress-details">${progress.cached} cached, ${progress.fetched} fetched${errorText}</div>
-                            <div class="mini-progress-bar">
-                                <div class="mini-progress-fill" style="width: ${percent}%"></div>
-                            </div>
-                        </div>
-                    `;
-                }
-            }
-        } catch (e) {
-            // Ignore progress errors
-        }
-    }, 500);
 
     try {
         const response = await fetch(`/api/tournament/${cleanTag}/analyze`);
         const data = await response.json();
 
-        clearInterval(progressInterval);
-
         if (response.ok) {
             displayAnalysis(cardIndex, data);
         } else {
-            displayAnalysisError(cardIndex, data.error || 'Analysis failed');
+            displayAnalysisError(cardIndex, data.detail || data.error || 'Analysis failed');
         }
     } catch (error) {
-        clearInterval(progressInterval);
         console.error(`Error analyzing tournament ${tag}:`, error);
         displayAnalysisError(cardIndex, 'Network error during analysis');
     } finally {
@@ -332,10 +304,11 @@ function displayAnalysis(cardIndex, data) {
     
     // Add stats footer
     const stats = data.analysis.stats;
+    const errorsText = stats.errors > 0 ? `${stats.errors} errors` : 'no errors';
     html += `
         <div class="analysis-footer">
             <span>${stats.successful}/${stats.total} players</span>
-            <span class="cache-info">${stats.cached} cached</span>
+            <span class="${stats.errors > 0 ? 'error-info' : 'fetch-info'}">${errorsText}</span>
         </div>
     `;
     
@@ -351,3 +324,4 @@ function displayAnalysisError(cardIndex, errorMessage) {
     tierBarsContainer.innerHTML = `<div class="analysis-error">${errorMessage}</div>`;
     analysisResults.style.display = 'block';
 }
+

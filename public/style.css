@@ -530,8 +530,12 @@ footer span {
     color: var(--text-muted);
 }
 
-.cache-info {
+.cache-info, .fetch-info {
     color: var(--accent-green);
+}
+
+.error-info {
+    color: var(--accent-red);
 }
 
 .analysis-loading {

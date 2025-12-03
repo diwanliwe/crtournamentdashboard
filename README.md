@@ -1,14 +1,15 @@
 # CR Tournament Dashboard
 
-A real-time Clash Royale tournament monitoring dashboard built with Flask. Track multiple qualifier tournaments simultaneously with live player counts and status updates.
+A real-time Clash Royale tournament monitoring dashboard built with FastAPI. Track multiple qualifier tournaments simultaneously with live player counts, status updates, and player skill analysis.
 
 ## Features
 
 - Monitor up to 3 tournaments at once
 - Real-time player count tracking
 - Visual progress bars showing tournament capacity
-- Auto-refresh every 3 seconds
+- Auto-refresh every 5 seconds
 - Tournament status indicators (in preparation, in progress, ended)
+- **Player Analysis**: Classify all players by skill tier (Top 1K, Top 10K, etc.)
 
 ## Setup
 
@@ -16,12 +17,12 @@ A real-time Clash Royale tournament monitoring dashboard built with Flask. Track
 
 ```bash
 # Create virtual environment
-python3 -m venv venv
+python3 -m venv venv-fastapi
 
 # Activate virtual environment
-source venv/bin/activate  # macOS/Linux
+source venv-fastapi/bin/activate  # macOS/Linux
 # or
-venv\Scripts\activate     # Windows
+venv-fastapi\Scripts\activate     # Windows
 
 # Install requirements
 pip install -r requirements.txt
@@ -44,50 +45,67 @@ Since your local machine doesn't have a static public IP, you'll need to use the
 Create a `.env` file in the project root:
 
 ```bash
-touch .env
-```
-
-Then add your API key to the `.env` file:
-
-```
 CR_API_KEY=your_api_key_here
 ```
-
-> **Note:** The `.env` file is used to store your API key securely without committing it to version control.
 
 ### 4. Run the Dashboard
 
 ```bash
-source venv/bin/activate  # Make sure venv is activated
-python app.py
+source venv-fastapi/bin/activate  # Make sure venv is activated
+uvicorn api.index:app --reload --port 8080
 ```
 
 Open your browser at: **http://localhost:8080**
+
+## Vercel Deployment
+
+This app is configured for Vercel serverless deployment:
+
+```bash
+# Install Vercel CLI
+npm i -g vercel
+
+# Add environment variable
+vercel env add CR_API_KEY
+
+# Deploy
+vercel
+```
 
 ## Usage
 
 1. Enter tournament tags in the input fields (e.g., `#2JYLU8YQ`)
 2. Click **Start Monitoring**
-3. The dashboard will auto-refresh every 3 seconds
+3. The dashboard will auto-refresh every 5 seconds
+4. Click **Analyze Players** to classify all players by skill tier
 
 ## API Endpoints
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /` | Dashboard UI |
-| `GET /api/tournament/<tag>` | Get tournament summary (for dashboard) |
-| `GET /api/tournament/<tag>/full` | Get full tournament data with all members |
-| `GET /api/player/<tag>` | Get player profile (cached) |
-| `GET /api/cache/stats` | View cache statistics |
-| `POST /api/cache/clear` | Clear the player cache |
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/tournament/{tag}` | Get tournament summary |
+| GET | `/api/tournament/{tag}/full` | Get full tournament data with all members |
+| GET | `/api/tournament/{tag}/analyze` | Analyze and classify all players |
+| GET | `/api/player/{tag}` | Get player profile |
+| GET | `/api/player/{tag}/classify` | Get player classification |
+| GET | `/api/cache/stats` | Cache stats (disabled in serverless) |
+| POST | `/api/cache/clear` | Clear cache (no-op in serverless) |
 
-### Player Cache
+## Player Classification Tiers
 
-The app automatically caches player profiles to `data/player_cache.json` to avoid redundant API calls. When you fetch a player:
-- First request: Fetches from API and stores in cache
-- Subsequent requests: Returns cached data instantly
+Players are classified into skill tiers based on their Path of Legends performance:
 
-Cached responses include `_cached: true` to indicate cache hit.
+| Tier | Criteria |
+|------|----------|
+| Top 1K | PoL rank ≤ 1,000 |
+| Top 10K | PoL rank ≤ 10,000 |
+| Top 50K | PoL rank ≤ 50,000 |
+| Ever Ranked | Has any PoL rank |
+| Final League | Has PoL trophies but no rank |
+| Reached 15K | Seasonal trophies ≥ 15,000 |
+| Seasonal 10K-15K | Seasonal trophies 10,000-14,999 |
+| Casual | Base trophies 8,000-9,999 |
+| Beginner | Base trophies < 8,000 |
 
 ## How the Proxy Works
 
@@ -98,20 +116,29 @@ This app uses the [RoyaleAPI Proxy](https://docs.royaleapi.com/#/proxy) to acces
 
 The proxy forwards your authenticated requests while using a static IP (`45.79.218.79`) that you can whitelist in your API key settings.
 
-## Example Data
-
-See the `data/` folder for example API responses:
-- `tournament_enzypel.json` - Tournament response example
-- `player_example.json` - Player profile response example
-- `top_player_example.json` - Top player profile response example
-
 ## Tech Stack
 
-- **Backend**: Flask, Python
+- **Backend**: FastAPI, Python, httpx (async HTTP)
 - **Frontend**: Vanilla JS, CSS
+- **Deployment**: Vercel Serverless
 - **API**: Clash Royale Official API via RoyaleAPI Proxy
+
+## Project Structure
+
+```
+/
+├── api/
+│   └── index.py          # FastAPI application
+├── public/
+│   ├── index.html        # Dashboard UI
+│   ├── style.css         # Styles
+│   └── script.js         # Frontend logic
+├── data/
+│   └── *.json            # Example API responses
+├── vercel.json           # Vercel configuration
+└── requirements.txt      # Python dependencies
+```
 
 ## Community Support
 
 Join the [RoyaleAPI Developer Discord](https://discord.gg/royaleapi) for help!
-
