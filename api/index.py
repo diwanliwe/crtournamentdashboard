@@ -2,13 +2,10 @@ import os
 import time
 from datetime import datetime
 from urllib.parse import quote
-from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -51,15 +48,6 @@ def has_pol_trophies(player_data):
     return False
 
 
-def get_seasonal_trophies(player_data):
-    """Get current seasonal trophy road trophies."""
-    progress = player_data.get("progress", {})
-    for key, value in progress.items():
-        if key.startswith("seasonal-trophy-road-"):
-            return value.get("trophies", 0)
-    return 0
-
-
 def classify_player(player_data):
     """
     Classify a player into skill tiers (highest priority first):
@@ -68,10 +56,12 @@ def classify_player(player_data):
     3. top_50k - PoL rank <= 50000
     4. ever_ranked - Has any PoL rank
     5. final_league - PoL trophies > 0 (no rank)
-    6. reached_15k - Seasonal trophies = 15000 (only if base trophies = 10000)
-    7. seasonal_10k_15k - Seasonal trophies 10000-14999 (only if base trophies = 10000)
+    6. reached_12k - Base trophies >= 12000
+    7. trophy_10k_12k - Base trophies 10000-11999
     8. casual - Base trophies 8000-9999
     9. beginner - Base trophies < 8000
+    
+    Note: Seasonal trophies removed in Dec 2024 update, now using base trophies only.
     """
     base_trophies = player_data.get("trophies", 0)
     
@@ -86,25 +76,21 @@ def classify_player(player_data):
         elif best_rank <= 50000:
             return {"tier": "top_50k", "label": "Top 50K", "rank": best_rank, "priority": 3}
         else:
-            return {"tier": "ever_ranked", "label": "Ever Ranked", "rank": best_rank, "priority": 4}
+            return {"tier": "ever_ranked", "label": "Classé", "rank": best_rank, "priority": 4}
     
     # Check if reached final league (has trophies but no rank)
     if has_pol_trophies(player_data):
-        return {"tier": "final_league", "label": "Final League", "priority": 5}
+        return {"tier": "final_league", "label": "Ligue Ultime", "priority": 5}
     
-    # Check seasonal trophy road - ONLY if player reached 10K base trophies
-    if base_trophies >= 10000:
-        seasonal = get_seasonal_trophies(player_data)
-        if seasonal >= 15000:
-            return {"tier": "reached_15k", "label": "Reached 15K", "seasonal_trophies": seasonal, "priority": 6}
-        elif seasonal >= 10000:
-            return {"tier": "seasonal_10k_15k", "label": "Seasonal 10K-15K", "seasonal_trophies": seasonal, "priority": 7}
-    
-    # Fall back to base trophies
-    if base_trophies >= 8000:
+    # Classify by base trophies (no more seasonal trophies since Dec 2024)
+    if base_trophies >= 12000:
+        return {"tier": "reached_12k", "label": "12K+", "trophies": base_trophies, "priority": 6}
+    elif base_trophies >= 10000:
+        return {"tier": "trophy_10k_12k", "label": "10K-12K", "trophies": base_trophies, "priority": 7}
+    elif base_trophies >= 8000:
         return {"tier": "casual", "label": "Casual (8K-10K)", "trophies": base_trophies, "priority": 8}
     else:
-        return {"tier": "beginner", "label": "Beginner (<8K)", "trophies": base_trophies, "priority": 9}
+        return {"tier": "beginner", "label": "Débutant (<8K)", "trophies": base_trophies, "priority": 9}
 
 
 async def fetch_player_from_api(client: httpx.AsyncClient, tag: str):
@@ -150,15 +136,15 @@ async def analyze_tournament_players(members_list):
     results = []
     errors = []
     
-    # Initialize summary counters
+    # Initialize summary counters (updated for Dec 2024 trophy changes)
     tier_counts = {
         "top_1k": 0,
         "top_10k": 0,
         "top_50k": 0,
         "ever_ranked": 0,
         "final_league": 0,
-        "reached_15k": 0,
-        "seasonal_10k_15k": 0,
+        "reached_12k": 0,
+        "trophy_10k_12k": 0,
         "casual": 0,
         "beginner": 0,
     }
@@ -220,6 +206,119 @@ async def analyze_tournament_players(members_list):
     }
 
 
+@app.get("/api/tournament/{tag:path}")
+async def get_tournament(tag: str):
+    """Get tournament summary for dashboard display."""
+    if not API_KEY:
+        raise HTTPException(status_code=500, detail="API key not configured. Check your .env file.")
+
+    # Ensure tag starts with # and encode it
+    if not tag.startswith("#"):
+        tag = "#" + tag
+    encoded_tag = quote(tag, safe="")
+
+    url = f"{CR_API_BASE}/tournaments/{encoded_tag}"
+
+    # Retry up to 3 times with increasing timeout
+    max_retries = 3
+    async with httpx.AsyncClient() as client:
+        for attempt in range(max_retries):
+            try:
+                timeout = 15 + (attempt * 10)  # 15s, 25s, 35s
+                response = await client.get(url, headers=get_headers(), timeout=float(timeout))
+                break  # Success, exit retry loop
+            except httpx.TimeoutException:
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1)
+                    continue
+                else:
+                    raise HTTPException(status_code=504, detail="Request timeout - API proxy is slow")
+            except httpx.RequestError as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        if response.status_code == 200:
+            data = response.json()
+            return {
+                "tag": data.get("tag", ""),
+                "name": data.get("name", "Unknown"),
+                "status": data.get("status", "unknown"),
+                "capacity": data.get("capacity", 0),
+                "maxCapacity": data.get("maxCapacity", 1000),
+                "membersList": len(data.get("membersList", [])),
+            }
+        elif response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Tournament not found")
+        elif response.status_code == 403:
+            raise HTTPException(status_code=403, detail="API access forbidden. Check your API key has IP 45.79.218.79 whitelisted.")
+        else:
+            raise HTTPException(status_code=response.status_code, detail=f"API error: {response.status_code}")
+
+
+@app.get("/api/tournament/{tag:path}/full")
+async def get_tournament_full(tag: str):
+    """Get full tournament data including all members."""
+    if not API_KEY:
+        raise HTTPException(status_code=500, detail="API key not configured")
+
+    if not tag.startswith("#"):
+        tag = "#" + tag
+    encoded_tag = quote(tag, safe="")
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(
+                f"{CR_API_BASE}/tournaments/{encoded_tag}",
+                headers=get_headers(),
+                timeout=10.0
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 404:
+                raise HTTPException(status_code=404, detail="Tournament not found")
+            else:
+                raise HTTPException(status_code=response.status_code, detail=f"API error: {response.status_code}")
+
+        except httpx.TimeoutException:
+            raise HTTPException(status_code=504, detail="Request timeout")
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/player/{tag:path}")
+async def get_player(tag: str):
+    """Get player profile."""
+    if not API_KEY:
+        raise HTTPException(status_code=500, detail="API key not configured")
+
+    if not tag.startswith("#"):
+        tag = "#" + tag
+
+    encoded_tag = quote(tag, safe="")
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(
+                f"{CR_API_BASE}/players/{encoded_tag}",
+                headers=get_headers(),
+                timeout=10.0
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                data["_cached"] = False
+                return data
+            elif response.status_code == 404:
+                raise HTTPException(status_code=404, detail="Player not found")
+            else:
+                raise HTTPException(status_code=response.status_code, detail=f"API error: {response.status_code}")
+
+        except httpx.TimeoutException:
+            raise HTTPException(status_code=504, detail="Request timeout")
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/cache/stats")
 async def cache_stats():
     """Get cache statistics (no-op in serverless)."""
@@ -236,12 +335,7 @@ async def clear_cache():
     return {"message": "Cache clearing not applicable in serverless mode"}
 
 
-# IMPORTANT: More specific routes must come BEFORE less specific ones
-# /api/tournament/{tag}/analyze BEFORE /api/tournament/{tag}
-# /api/tournament/{tag}/full BEFORE /api/tournament/{tag}
-# /api/player/{tag}/classify BEFORE /api/player/{tag}
-
-@app.get("/api/tournament/{tag}/analyze")
+@app.get("/api/tournament/{tag:path}/analyze")
 async def analyze_tournament(tag: str):
     """
     Analyze all players in a tournament.
@@ -290,86 +384,7 @@ async def analyze_tournament(tag: str):
     }
 
 
-@app.get("/api/tournament/{tag}/full")
-async def get_tournament_full(tag: str):
-    """Get full tournament data including all members."""
-    if not API_KEY:
-        raise HTTPException(status_code=500, detail="API key not configured")
-
-    if not tag.startswith("#"):
-        tag = "#" + tag
-    encoded_tag = quote(tag, safe="")
-
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(
-                f"{CR_API_BASE}/tournaments/{encoded_tag}",
-                headers=get_headers(),
-                timeout=10.0
-            )
-
-            if response.status_code == 200:
-                return response.json()
-            elif response.status_code == 404:
-                raise HTTPException(status_code=404, detail="Tournament not found")
-            else:
-                raise HTTPException(status_code=response.status_code, detail=f"API error: {response.status_code}")
-
-        except httpx.TimeoutException:
-            raise HTTPException(status_code=504, detail="Request timeout")
-        except httpx.RequestError as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/tournament/{tag}")
-async def get_tournament(tag: str):
-    """Get tournament summary for dashboard display."""
-    if not API_KEY:
-        raise HTTPException(status_code=500, detail="API key not configured. Check your .env file.")
-
-    # Ensure tag starts with # and encode it
-    if not tag.startswith("#"):
-        tag = "#" + tag
-    encoded_tag = quote(tag, safe="")
-
-    url = f"{CR_API_BASE}/tournaments/{encoded_tag}"
-
-    # Retry up to 3 times with increasing timeout
-    max_retries = 3
-    async with httpx.AsyncClient() as client:
-        for attempt in range(max_retries):
-            try:
-                timeout = 15 + (attempt * 10)  # 15s, 25s, 35s
-                response = await client.get(url, headers=get_headers(), timeout=float(timeout))
-                break  # Success, exit retry loop
-            except httpx.TimeoutException:
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(1)
-                    continue
-                else:
-                    raise HTTPException(status_code=504, detail="Request timeout - API proxy is slow")
-            except httpx.RequestError as e:
-                raise HTTPException(status_code=500, detail=str(e))
-
-        if response.status_code == 200:
-            data = response.json()
-            return {
-                "tag": data.get("tag", ""),
-                "name": data.get("name", "Unknown"),
-                "status": data.get("status", "unknown"),
-                "capacity": data.get("capacity", 0),
-                "maxCapacity": data.get("maxCapacity", 1000),
-                "membersList": len(data.get("membersList", [])),
-            }
-        elif response.status_code == 404:
-            raise HTTPException(status_code=404, detail="Tournament not found")
-        elif response.status_code == 403:
-            raise HTTPException(status_code=403, detail="API access forbidden. Check your API key has IP 45.79.218.79 whitelisted.")
-        else:
-            raise HTTPException(status_code=response.status_code, detail=f"API error: {response.status_code}")
-
-
-@app.get("/api/player/{tag}/classify")
+@app.get("/api/player/{tag:path}/classify")
 async def classify_player_endpoint(tag: str):
     """Fetch player profile and return their classification."""
     if not API_KEY:
@@ -407,64 +422,76 @@ async def classify_player_endpoint(tag: str):
             "last": player_data.get("lastPathOfLegendSeasonResult"),
             "best": player_data.get("bestPathOfLegendSeasonResult"),
         },
-        "seasonalTrophies": get_seasonal_trophies(player_data),
         "_cached": False
     }
 
 
-@app.get("/api/player/{tag}")
-async def get_player(tag: str):
-    """Get player profile."""
-    if not API_KEY:
-        raise HTTPException(status_code=500, detail="API key not configured")
+# ============================================================
+# Static file serving (for local development)
+# ============================================================
+import pathlib
+from fastapi.responses import HTMLResponse, FileResponse
 
-    if not tag.startswith("#"):
-        tag = "#" + tag
-
-    encoded_tag = quote(tag, safe="")
-
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(
-                f"{CR_API_BASE}/players/{encoded_tag}",
-                headers=get_headers(),
-                timeout=10.0
-            )
-
-            if response.status_code == 200:
-                data = response.json()
-                data["_cached"] = False
-                return data
-            elif response.status_code == 404:
-                raise HTTPException(status_code=404, detail="Player not found")
-            else:
-                raise HTTPException(status_code=response.status_code, detail=f"API error: {response.status_code}")
-
-        except httpx.TimeoutException:
-            raise HTTPException(status_code=504, detail="Request timeout")
-        except httpx.RequestError as e:
-            raise HTTPException(status_code=500, detail=str(e))
+PUBLIC_DIR = pathlib.Path(__file__).parent.parent / "public"
 
 
-# --- Static file serving for LOCAL DEVELOPMENT only ---
-# Must be at the END so API routes are matched first
-# In production (Vercel), static files are served directly from public/
-PUBLIC_DIR = Path(__file__).parent.parent / "public"
+@app.get("/", response_class=HTMLResponse)
+async def serve_homepage():
+    index_path = PUBLIC_DIR / "index.html"
+    if index_path.exists():
+        return HTMLResponse(content=index_path.read_text())
+    raise HTTPException(status_code=404, detail="index.html not found")
 
-@app.get("/")
-async def serve_index():
-    if PUBLIC_DIR.exists():
-        return FileResponse(PUBLIC_DIR / "index.html")
-    raise HTTPException(status_code=404, detail="Not found")
 
-@app.get("/{filename:path}")
-async def serve_static(filename: str):
-    # Skip API routes (they should be matched above)
-    if filename.startswith("api/"):
-        raise HTTPException(status_code=404, detail="Not found")
-    
-    file_path = PUBLIC_DIR / filename
-    if PUBLIC_DIR.exists() and file_path.exists() and file_path.is_file():
-        return FileResponse(file_path)
-    raise HTTPException(status_code=404, detail="File not found")
+@app.get("/dashboard.html", response_class=HTMLResponse)
+async def serve_dashboard():
+    dashboard_path = PUBLIC_DIR / "dashboard.html"
+    if dashboard_path.exists():
+        return HTMLResponse(content=dashboard_path.read_text())
+    raise HTTPException(status_code=404, detail="dashboard.html not found")
 
+
+@app.get("/public.css")
+async def serve_public_css():
+    css_path = PUBLIC_DIR / "public.css"
+    if css_path.exists():
+        return FileResponse(css_path, media_type="text/css")
+    raise HTTPException(status_code=404, detail="public.css not found")
+
+
+@app.get("/public.js")
+async def serve_public_js():
+    js_path = PUBLIC_DIR / "public.js"
+    if js_path.exists():
+        return FileResponse(js_path, media_type="application/javascript")
+    raise HTTPException(status_code=404, detail="public.js not found")
+
+
+@app.get("/style.css")
+async def serve_style_css():
+    css_path = PUBLIC_DIR / "style.css"
+    if css_path.exists():
+        return FileResponse(css_path, media_type="text/css")
+    raise HTTPException(status_code=404, detail="style.css not found")
+
+
+@app.get("/script.js")
+async def serve_script_js():
+    js_path = PUBLIC_DIR / "script.js"
+    if js_path.exists():
+        return FileResponse(js_path, media_type="application/javascript")
+    raise HTTPException(status_code=404, detail="script.js not found")
+
+
+@app.get("/assets/{path:path}")
+async def serve_assets(path: str):
+    asset_path = PUBLIC_DIR / "assets" / path
+    if asset_path.exists() and asset_path.is_file():
+        suffix = asset_path.suffix.lower()
+        content_types = {
+            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".gif": "image/gif", ".svg": "image/svg+xml", ".ico": "image/x-icon",
+            ".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf", ".otf": "font/otf",
+        }
+        return FileResponse(asset_path, media_type=content_types.get(suffix, "application/octet-stream"))
+    raise HTTPException(status_code=404, detail=f"Asset not found: {path}")
