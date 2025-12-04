@@ -427,71 +427,68 @@ async def classify_player_endpoint(tag: str):
 
 
 # ============================================================
-# Static file serving (for local development)
+# Static file serving (for local development only)
+# On Vercel, static files are served directly from the root folder
 # ============================================================
+import os
 import pathlib
 from fastapi.responses import HTMLResponse, FileResponse
 
-PUBLIC_DIR = pathlib.Path(__file__).parent.parent / "public"
+# Only enable static file serving when running locally (not on Vercel)
+if not os.environ.get("VERCEL"):
+    PUBLIC_DIR = pathlib.Path(__file__).parent.parent / "public"
 
+    @app.get("/", response_class=HTMLResponse)
+    async def serve_homepage():
+        index_path = PUBLIC_DIR / "index.html"
+        if index_path.exists():
+            return HTMLResponse(content=index_path.read_text())
+        raise HTTPException(status_code=404, detail="index.html not found")
 
-@app.get("/", response_class=HTMLResponse)
-async def serve_homepage():
-    index_path = PUBLIC_DIR / "index.html"
-    if index_path.exists():
-        return HTMLResponse(content=index_path.read_text())
-    raise HTTPException(status_code=404, detail="index.html not found")
+    @app.get("/dashboard.html", response_class=HTMLResponse)
+    async def serve_dashboard():
+        dashboard_path = PUBLIC_DIR / "dashboard.html"
+        if dashboard_path.exists():
+            return HTMLResponse(content=dashboard_path.read_text())
+        raise HTTPException(status_code=404, detail="dashboard.html not found")
 
+    @app.get("/public.css")
+    async def serve_public_css():
+        css_path = PUBLIC_DIR / "public.css"
+        if css_path.exists():
+            return FileResponse(css_path, media_type="text/css")
+        raise HTTPException(status_code=404, detail="public.css not found")
 
-@app.get("/dashboard.html", response_class=HTMLResponse)
-async def serve_dashboard():
-    dashboard_path = PUBLIC_DIR / "dashboard.html"
-    if dashboard_path.exists():
-        return HTMLResponse(content=dashboard_path.read_text())
-    raise HTTPException(status_code=404, detail="dashboard.html not found")
+    @app.get("/public.js")
+    async def serve_public_js():
+        js_path = PUBLIC_DIR / "public.js"
+        if js_path.exists():
+            return FileResponse(js_path, media_type="application/javascript")
+        raise HTTPException(status_code=404, detail="public.js not found")
 
+    @app.get("/style.css")
+    async def serve_style_css():
+        css_path = PUBLIC_DIR / "style.css"
+        if css_path.exists():
+            return FileResponse(css_path, media_type="text/css")
+        raise HTTPException(status_code=404, detail="style.css not found")
 
-@app.get("/public.css")
-async def serve_public_css():
-    css_path = PUBLIC_DIR / "public.css"
-    if css_path.exists():
-        return FileResponse(css_path, media_type="text/css")
-    raise HTTPException(status_code=404, detail="public.css not found")
+    @app.get("/script.js")
+    async def serve_script_js():
+        js_path = PUBLIC_DIR / "script.js"
+        if js_path.exists():
+            return FileResponse(js_path, media_type="application/javascript")
+        raise HTTPException(status_code=404, detail="script.js not found")
 
-
-@app.get("/public.js")
-async def serve_public_js():
-    js_path = PUBLIC_DIR / "public.js"
-    if js_path.exists():
-        return FileResponse(js_path, media_type="application/javascript")
-    raise HTTPException(status_code=404, detail="public.js not found")
-
-
-@app.get("/style.css")
-async def serve_style_css():
-    css_path = PUBLIC_DIR / "style.css"
-    if css_path.exists():
-        return FileResponse(css_path, media_type="text/css")
-    raise HTTPException(status_code=404, detail="style.css not found")
-
-
-@app.get("/script.js")
-async def serve_script_js():
-    js_path = PUBLIC_DIR / "script.js"
-    if js_path.exists():
-        return FileResponse(js_path, media_type="application/javascript")
-    raise HTTPException(status_code=404, detail="script.js not found")
-
-
-@app.get("/assets/{path:path}")
-async def serve_assets(path: str):
-    asset_path = PUBLIC_DIR / "assets" / path
-    if asset_path.exists() and asset_path.is_file():
-        suffix = asset_path.suffix.lower()
-        content_types = {
-            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-            ".gif": "image/gif", ".svg": "image/svg+xml", ".ico": "image/x-icon",
-            ".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf", ".otf": "font/otf",
-        }
-        return FileResponse(asset_path, media_type=content_types.get(suffix, "application/octet-stream"))
-    raise HTTPException(status_code=404, detail=f"Asset not found: {path}")
+    @app.get("/assets/{path:path}")
+    async def serve_assets(path: str):
+        asset_path = PUBLIC_DIR / "assets" / path
+        if asset_path.exists() and asset_path.is_file():
+            suffix = asset_path.suffix.lower()
+            content_types = {
+                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".gif": "image/gif", ".svg": "image/svg+xml", ".ico": "image/x-icon",
+                ".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf", ".otf": "font/otf",
+            }
+            return FileResponse(asset_path, media_type=content_types.get(suffix, "application/octet-stream"))
+        raise HTTPException(status_code=404, detail=f"Asset not found: {path}")
