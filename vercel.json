@@ -1,7 +1,19 @@
 {
+  "builds": [
+    { "src": "api/index.py", "use": "@vercel/python" },
+    { "src": "*.html", "use": "@vercel/static" },
+    { "src": "*.css", "use": "@vercel/static" },
+    { "src": "*.js", "use": "@vercel/static" },
+    { "src": "assets/**", "use": "@vercel/static" }
+  ],
   "routes": [
-    { "handle": "filesystem" },
     { "src": "/api/(.*)", "dest": "/api/index.py" },
-    { "src": "/(.*)", "dest": "/index.html" }
+    { "src": "/assets/(.*)", "dest": "/assets/$1" },
+    { "src": "^/public\\.css$", "dest": "/public.css" },
+    { "src": "^/public\\.js$", "dest": "/public.js" },
+    { "src": "^/style\\.css$", "dest": "/style.css" },
+    { "src": "^/script\\.js$", "dest": "/script.js" },
+    { "src": "^/dashboard\\.html$", "dest": "/dashboard.html" },
+    { "src": "^/$", "dest": "/index.html" }
   ]
 }
