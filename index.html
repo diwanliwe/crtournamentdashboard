@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>C'est Quoi Ce Niveau ? - Analyse ton tournoi Clash Royale</title>
+    <meta name="description" content="Analyse la distribution des niveaux de joueurs dans ton tournoi Clash Royale. Découvre combien de Top 1K, Top 10K et autres joueurs classés participent.">
+    <link rel="icon" type="image/png" href="/assets/images/icon_tournament.png">
+    <link rel="apple-touch-icon" href="/assets/images/icon_tournament.png">
+    <link rel="stylesheet" href="/public.css">
+</head>
+<body>
+    <div class="app">
+        <!-- Header with tournament banner -->
+        <header class="header">
+            <div class="header-banner">
+                <img src="/assets/images/header-title.png" alt="" class="header-image">
+                <div class="header-text">
+                    <h1 class="header-title">C'est quoi ce niveau ?</h1>
+                    <p class="header-subtitle">Analyse ton tournoi</p>
+                </div>
+            </div>
+        </header>
+
+        <!-- Search Section -->
+        <main class="main-content">
+            <div class="search-container">
+                <div class="search-box">
+                    <input 
+                        type="text" 
+                        id="tournamentTag" 
+                        class="search-input" 
+                        placeholder="#tagdutournoi"
+                        autocomplete="off"
+                        spellcheck="false"
+                    >
+                    <button id="searchBtn" class="search-button" aria-label="Rechercher">
+                        <div class="search-button-inner">
+                            <img src="/assets/images/search-icon.png" alt="Rechercher" class="search-icon">
+                        </div>
+                    </button>
+                </div>
+                <p class="search-hint" id="searchHint"></p>
+            </div>
+
+            <!-- Results Section (hidden initially) -->
+            <section id="resultsSection" class="results-section" style="display: none;">
+                <!-- Tournament Info -->
+                <div class="tournament-info" id="tournamentInfo">
+                    <h2 class="tournament-name" id="tournamentName"></h2>
+                    <div class="tournament-meta">
+                        <span class="tournament-status" id="tournamentStatus"></span>
+                        <span class="tournament-players" id="tournamentPlayers"></span>
+                    </div>
+                </div>
+
+                <!-- Analysis Results Panel -->
+                <div class="results-panel">
+                    <div class="panel-header">
+                        <span class="panel-title">Distribution des joueurs</span>
+                        <span class="panel-time" id="analysisTime"></span>
+                    </div>
+                    <div class="tier-list" id="tierList">
+                        <!-- Tier rows will be inserted here -->
+                    </div>
+                    <div class="panel-footer" id="panelFooter">
+                        <!-- Stats will be inserted here -->
+                    </div>
+                </div>
+
+                <!-- Search Again Button -->
+                <button id="resetBtn" class="reset-button">Analyser un autre tournoi</button>
+            </section>
+        </main>
+
+        <!-- Tip Panel -->
+        <footer class="tip-footer">
+            <div class="tip-panel">
+                <span class="tip-label">Conseil</span>
+                <p class="tip-text" id="tipText">Chargement...</p>
+            </div>
+        </footer>
+    </div>
+
+    <script src="/public.js"></script>
+</body>
+</html>

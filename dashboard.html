@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CR Tournament Dashboard</title>
+    <link rel="stylesheet" href="/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Tournament Dashboard</h1>
+            <p class="subtitle">Clash Royale Qualifier Monitor</p>
+        </header>
+
+        <div class="controls">
+            <button id="startBtn" class="btn-primary">Start Monitoring</button>
+            <button id="stopBtn" class="btn-secondary" disabled>Stop</button>
+            <span class="status-indicator" id="statusIndicator">
+                <span class="dot"></span>
+                <span class="text">Idle</span>
+            </span>
+        </div>
+
+        <div class="tournament-grid">
+            <!-- Tournament 1 -->
+            <div class="tournament-card" data-index="0">
+                <div class="card-header">
+                    <span class="card-number">Q1</span>
+                    <span class="status-badge" data-status="idle">--</span>
+                </div>
+                <div class="card-body">
+                    <div class="input-group">
+                        <label for="tag-0">Tournament Tag</label>
+                        <input type="text" id="tag-0" placeholder="#ABC123XYZ" class="tag-input">
+                    </div>
+                    <h2 class="tournament-name">Enter tag above</h2>
+                    <div class="player-count">
+                        <span class="count-current">--</span>
+                        <span class="count-separator">/</span>
+                        <span class="count-max">--</span>
+                    </div>
+                    <div class="player-label">players</div>
+                    <button class="btn-analyze" data-index="0" disabled>Analyze Players</button>
+                </div>
+                <div class="card-footer">
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: 0%"></div>
+                    </div>
+                    <div class="analysis-results" data-index="0" style="display: none;">
+                        <div class="analysis-header">
+                            <span class="analysis-title">Player Classification</span>
+                            <span class="analysis-time"></span>
+                        </div>
+                        <div class="tier-bars"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tournament 2 -->
+            <div class="tournament-card" data-index="1">
+                <div class="card-header">
+                    <span class="card-number">Q2</span>
+                    <span class="status-badge" data-status="idle">--</span>
+                </div>
+                <div class="card-body">
+                    <div class="input-group">
+                        <label for="tag-1">Tournament Tag</label>
+                        <input type="text" id="tag-1" placeholder="#ABC123XYZ" class="tag-input">
+                    </div>
+                    <h2 class="tournament-name">Enter tag above</h2>
+                    <div class="player-count">
+                        <span class="count-current">--</span>
+                        <span class="count-separator">/</span>
+                        <span class="count-max">--</span>
+                    </div>
+                    <div class="player-label">players</div>
+                    <button class="btn-analyze" data-index="1" disabled>Analyze Players</button>
+                </div>
+                <div class="card-footer">
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: 0%"></div>
+                    </div>
+                    <div class="analysis-results" data-index="1" style="display: none;">
+                        <div class="analysis-header">
+                            <span class="analysis-title">Player Classification</span>
+                            <span class="analysis-time"></span>
+                        </div>
+                        <div class="tier-bars"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tournament 3 -->
+            <div class="tournament-card" data-index="2">
+                <div class="card-header">
+                    <span class="card-number">Q3</span>
+                    <span class="status-badge" data-status="idle">--</span>
+                </div>
+                <div class="card-body">
+                    <div class="input-group">
+                        <label for="tag-2">Tournament Tag</label>
+                        <input type="text" id="tag-2" placeholder="#ABC123XYZ" class="tag-input">
+                    </div>
+                    <h2 class="tournament-name">Enter tag above</h2>
+                    <div class="player-count">
+                        <span class="count-current">--</span>
+                        <span class="count-separator">/</span>
+                        <span class="count-max">--</span>
+                    </div>
+                    <div class="player-label">players</div>
+                    <button class="btn-analyze" data-index="2" disabled>Analyze Players</button>
+                </div>
+                <div class="card-footer">
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: 0%"></div>
+                    </div>
+                    <div class="analysis-results" data-index="2" style="display: none;">
+                        <div class="analysis-header">
+                            <span class="analysis-title">Player Classification</span>
+                            <span class="analysis-time"></span>
+                        </div>
+                        <div class="tier-bars"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <footer>
+            <p>Auto-refresh: <span id="refreshRate">5</span>s | Last update: <span id="lastUpdate">--:--:--</span></p>
+        </footer>
+    </div>
+
+    <script src="/script.js"></script>
+</body>
+</html>
+
