@@ -206,6 +206,86 @@ async def analyze_tournament_players(members_list):
     }
 
 
+@app.get("/api/tournament/{tag:path}/analyze")
+async def analyze_tournament(tag: str):
+    """
+    Analyze all players in a tournament.
+    This fetches each player's profile and classifies them.
+    """
+    if not API_KEY:
+        raise HTTPException(status_code=500, detail="API key not configured")
+
+    if not tag.startswith("#"):
+        tag = "#" + tag
+    encoded_tag = quote(tag, safe="")
+
+    # First, fetch the tournament to get members list
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(
+                f"{CR_API_BASE}/tournaments/{encoded_tag}",
+                headers=get_headers(),
+                timeout=10.0
+            )
+            
+            if response.status_code != 200:
+                raise HTTPException(status_code=response.status_code, detail=f"Tournament API error: {response.status_code}")
+            
+            tournament_data = response.json()
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=500, detail=f"Failed to fetch tournament: {e}")
+
+    members_list = tournament_data.get("membersList", [])
+    
+    # Analyze all players
+    start_time = time.time()
+    analysis = await analyze_tournament_players(members_list)
+    elapsed = time.time() - start_time
+
+    return {
+        "tournament": {
+            "tag": tournament_data.get("tag"),
+            "name": tournament_data.get("name"),
+            "status": tournament_data.get("status"),
+            "capacity": tournament_data.get("capacity"),
+            "maxCapacity": tournament_data.get("maxCapacity"),
+        },
+        "analysis": analysis,
+        "elapsed_seconds": round(elapsed, 1),
+    }
+
+
+@app.get("/api/tournament/{tag:path}/full")
+async def get_tournament_full(tag: str):
+    """Get full tournament data including all members."""
+    if not API_KEY:
+        raise HTTPException(status_code=500, detail="API key not configured")
+
+    if not tag.startswith("#"):
+        tag = "#" + tag
+    encoded_tag = quote(tag, safe="")
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(
+                f"{CR_API_BASE}/tournaments/{encoded_tag}",
+                headers=get_headers(),
+                timeout=10.0
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 404:
+                raise HTTPException(status_code=404, detail="Tournament not found")
+            else:
+                raise HTTPException(status_code=response.status_code, detail=f"API error: {response.status_code}")
+
+        except httpx.TimeoutException:
+            raise HTTPException(status_code=504, detail="Request timeout")
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/tournament/{tag:path}")
 async def get_tournament(tag: str):
     """Get tournament summary for dashboard display."""
@@ -254,35 +334,46 @@ async def get_tournament(tag: str):
             raise HTTPException(status_code=response.status_code, detail=f"API error: {response.status_code}")
 
 
-@app.get("/api/tournament/{tag:path}/full")
-async def get_tournament_full(tag: str):
-    """Get full tournament data including all members."""
+@app.get("/api/player/{tag:path}/classify")
+async def classify_player_endpoint(tag: str):
+    """Fetch player profile and return their classification."""
     if not API_KEY:
         raise HTTPException(status_code=500, detail="API key not configured")
 
     if not tag.startswith("#"):
         tag = "#" + tag
-    encoded_tag = quote(tag, safe="")
 
+    encoded_tag = quote(tag, safe="")
+    
     async with httpx.AsyncClient() as client:
         try:
             response = await client.get(
-                f"{CR_API_BASE}/tournaments/{encoded_tag}",
+                f"{CR_API_BASE}/players/{encoded_tag}",
                 headers=get_headers(),
                 timeout=10.0
             )
-
-            if response.status_code == 200:
-                return response.json()
-            elif response.status_code == 404:
-                raise HTTPException(status_code=404, detail="Tournament not found")
-            else:
+            if response.status_code != 200:
                 raise HTTPException(status_code=response.status_code, detail=f"API error: {response.status_code}")
-
-        except httpx.TimeoutException:
-            raise HTTPException(status_code=504, detail="Request timeout")
+            
+            player_data = response.json()
         except httpx.RequestError as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+    # Classify the player
+    classification = classify_player(player_data)
+    
+    return {
+        "tag": player_data.get("tag"),
+        "name": player_data.get("name"),
+        "trophies": player_data.get("trophies"),
+        "classification": classification,
+        "pathOfLegend": {
+            "current": player_data.get("currentPathOfLegendSeasonResult"),
+            "last": player_data.get("lastPathOfLegendSeasonResult"),
+            "best": player_data.get("bestPathOfLegendSeasonResult"),
+        },
+        "_cached": False
+    }
 
 
 @app.get("/api/player/{tag:path}")
@@ -333,97 +424,6 @@ async def cache_stats():
 async def clear_cache():
     """Clear the player cache (no-op in serverless)."""
     return {"message": "Cache clearing not applicable in serverless mode"}
-
-
-@app.get("/api/tournament/{tag:path}/analyze")
-async def analyze_tournament(tag: str):
-    """
-    Analyze all players in a tournament.
-    This fetches each player's profile and classifies them.
-    """
-    if not API_KEY:
-        raise HTTPException(status_code=500, detail="API key not configured")
-
-    if not tag.startswith("#"):
-        tag = "#" + tag
-    encoded_tag = quote(tag, safe="")
-
-    # First, fetch the tournament to get members list
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(
-                f"{CR_API_BASE}/tournaments/{encoded_tag}",
-                headers=get_headers(),
-                timeout=10.0
-            )
-            
-            if response.status_code != 200:
-                raise HTTPException(status_code=response.status_code, detail=f"Tournament API error: {response.status_code}")
-            
-            tournament_data = response.json()
-        except httpx.RequestError as e:
-            raise HTTPException(status_code=500, detail=f"Failed to fetch tournament: {e}")
-
-    members_list = tournament_data.get("membersList", [])
-    
-    # Analyze all players
-    start_time = time.time()
-    analysis = await analyze_tournament_players(members_list)
-    elapsed = time.time() - start_time
-
-    return {
-        "tournament": {
-            "tag": tournament_data.get("tag"),
-            "name": tournament_data.get("name"),
-            "status": tournament_data.get("status"),
-            "capacity": tournament_data.get("capacity"),
-            "maxCapacity": tournament_data.get("maxCapacity"),
-        },
-        "analysis": analysis,
-        "elapsed_seconds": round(elapsed, 1),
-    }
-
-
-@app.get("/api/player/{tag:path}/classify")
-async def classify_player_endpoint(tag: str):
-    """Fetch player profile and return their classification."""
-    if not API_KEY:
-        raise HTTPException(status_code=500, detail="API key not configured")
-
-    if not tag.startswith("#"):
-        tag = "#" + tag
-
-    encoded_tag = quote(tag, safe="")
-    
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(
-                f"{CR_API_BASE}/players/{encoded_tag}",
-                headers=get_headers(),
-                timeout=10.0
-            )
-            if response.status_code != 200:
-                raise HTTPException(status_code=response.status_code, detail=f"API error: {response.status_code}")
-            
-            player_data = response.json()
-        except httpx.RequestError as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
-    # Classify the player
-    classification = classify_player(player_data)
-    
-    return {
-        "tag": player_data.get("tag"),
-        "name": player_data.get("name"),
-        "trophies": player_data.get("trophies"),
-        "classification": classification,
-        "pathOfLegend": {
-            "current": player_data.get("currentPathOfLegendSeasonResult"),
-            "last": player_data.get("lastPathOfLegendSeasonResult"),
-            "best": player_data.get("bestPathOfLegendSeasonResult"),
-        },
-        "_cached": False
-    }
 
 
 # ============================================================
