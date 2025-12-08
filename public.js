@@ -81,6 +81,9 @@ document.addEventListener('DOMContentLoaded', () => {
 // ===========================================
 
 async function handleSearch() {
+    console.log('[Debug] handleSearch called');
+    console.log('[Debug] posthog exists:', typeof posthog !== 'undefined');
+    
     if (isSearching) return;
     
     const tag = tagInput.value.trim();
@@ -88,6 +91,14 @@ async function handleSearch() {
         showHint('Entre le tag du tournoi', true);
         tagInput.focus();
         return;
+    }
+    
+    // Track button click
+    if (typeof posthog !== 'undefined') {
+        posthog.capture('search_button_clicked');
+        console.log('[PostHog] Event captured: search_button_clicked');
+    } else {
+        console.warn('[PostHog] posthog is not defined');
     }
     
     isSearching = true;

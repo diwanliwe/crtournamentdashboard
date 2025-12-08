@@ -43,6 +43,13 @@ document.addEventListener('DOMContentLoaded', () => {
             const index = btn.getAttribute('data-index');
             const tag = document.getElementById(`tag-${index}`).value.trim();
             if (tag) {
+                // Track button click
+                if (typeof posthog !== 'undefined') {
+                    posthog.capture('analyze_button_clicked');
+                    console.log('[PostHog] Event captured: analyze_button_clicked');
+                } else {
+                    console.warn('[PostHog] posthog is not defined');
+                }
                 analyzeTourn(tag, index);
             }
         });

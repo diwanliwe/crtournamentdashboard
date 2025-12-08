@@ -12,6 +12,31 @@ load_dotenv()
 
 app = FastAPI()
 
+# PostHog server-side tracking
+POSTHOG_API_KEY = os.getenv("POSTHOG_KEY", "")
+POSTHOG_HOST = "https://us.i.posthog.com"
+
+
+async def capture_event(event_name: str, distinct_id: str = "anonymous", properties: dict = None):
+    """Send event to PostHog server-side (bypasses ad blockers)."""
+    if not POSTHOG_API_KEY:
+        return
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"{POSTHOG_HOST}/capture/",
+                json={
+                    "api_key": POSTHOG_API_KEY,
+                    "event": event_name,
+                    "distinct_id": distinct_id,
+                    "properties": properties or {}
+                },
+                timeout=5.0
+            )
+    except Exception as e:
+        print(f"[PostHog] Failed to capture event: {e}")
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -318,6 +343,14 @@ async def get_tournament(tag: str):
 
         if response.status_code == 200:
             data = response.json()
+            
+            # Track tournament search event (server-side)
+            await capture_event("tournament_searched", properties={
+                "tournament_tag": data.get("tag", ""),
+                "tournament_name": data.get("name", ""),
+                "player_count": len(data.get("membersList", [])),
+            })
+            
             return {
                 "tag": data.get("tag", ""),
                 "name": data.get("name", "Unknown"),
