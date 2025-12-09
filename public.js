@@ -17,16 +17,15 @@ const TIER_CONFIG = {
 };
 
 const TIPS = [
-    "Les joueurs Top 1K sont parmi les meilleurs au monde !",
-    "Un joueur classé a atteint le classement mondial au moins une fois.",
-    "La Ligue Ultime est le dernier palier avant d'être classé.",
-    "Les joueurs Casual ont entre 8000 et 10000 trophées de base.",
+    "Top 1K = Élite mondiale, Top 10K = Élite de ton pays !",
+    "Un joueur classé a atteint le Top mondial au moins une fois.",
+    "Champion Suprême est la ligue la plus élevée du jeu !",
+    "Le chemin des trophées s'arrêtait à 10K, maintenant c'est 12K !",
     "L'analyse peut prendre jusqu'à 30 secondes pour les gros tournois.",
     "Le tag du tournoi se trouve dans les détails du tournoi en jeu.",
     "Tu peux copier le tag directement depuis Clash Royale !",
     "Les pourcentages montrent la répartition des niveaux de joueurs.",
-    "Un tournoi équilibré a une bonne distribution de tous les niveaux.",
-    "Les Top 10K représentent l'élite des joueurs réguliers.",
+    "Code Ashtax dans le magasin pour soutenir les projets !",
 ];
 
 const TIP_ROTATION_INTERVAL = 6000; // 6 seconds

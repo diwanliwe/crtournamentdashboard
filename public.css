@@ -645,7 +645,7 @@ body {
 /* Tip Footer */
 .tip-footer {
     flex-shrink: 0;
-    padding: 0 0 1rem;
+    padding: 0 0 2rem;
     margin-top: 1.5rem;
     width: 100%;
     display: flex;
