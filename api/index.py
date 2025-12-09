@@ -184,18 +184,18 @@ def get_vercel_url():
     return None
 
 
-async def analyze_tournament_players(members_list, use_cache: bool = True):
+async def analyze_tournament_players(members_list):
     """
     Analyze all players in a tournament using async fetching.
     Returns dict with players list and summary stats.
     
-    When use_cache=True and running on Vercel, fetches through our cached
-    player endpoint to leverage Vercel's edge cache for 12-hour caching.
+    Note: Uses direct API calls (not cached endpoint) because serverless
+    functions calling themselves via HTTP causes issues on Vercel.
+    Individual player lookups from the frontend still benefit from edge caching.
     """
     total = len(members_list)
     results = []
     errors = []
-    cache_hits = 0
     
     # Initialize summary counters (updated for Dec 2024 trophy changes)
     tier_counts = {
@@ -212,10 +212,7 @@ async def analyze_tournament_players(members_list, use_cache: bool = True):
     
     start_time = time.time()
     
-    # Get base URL for cached requests (only on Vercel)
-    base_url = get_vercel_url() if use_cache else None
-    
-    # Use async client with connection pooling
+    # Use async client with connection pooling - direct API calls
     async with httpx.AsyncClient() as client:
         # Create tasks for all players (with semaphore to limit concurrency)
         semaphore = asyncio.Semaphore(30)  # Limit concurrent requests
@@ -223,16 +220,14 @@ async def analyze_tournament_players(members_list, use_cache: bool = True):
         async def fetch_with_semaphore(member):
             async with semaphore:
                 player_tag = member.get("tag", "")
-                tag, player_data, error, was_cached = await fetch_player_from_api(client, player_tag, base_url)
-                return (member, tag, player_data, error, was_cached)
+                # Always use direct API calls (base_url=None)
+                tag, player_data, error, _ = await fetch_player_from_api(client, player_tag, None)
+                return (member, tag, player_data, error)
         
         tasks = [fetch_with_semaphore(member) for member in members_list]
         
         for coro in asyncio.as_completed(tasks):
-            member, tag, player_data, error, was_cached = await coro
-            
-            if was_cached:
-                cache_hits += 1
+            member, tag, player_data, error = await coro
             
             if error:
                 errors.append({"tag": tag, "error": error})
@@ -266,9 +261,7 @@ async def analyze_tournament_players(members_list, use_cache: bool = True):
             "total": total,
             "successful": successful,
             "errors": len(errors),
-            "cached": cache_hits,
-            "fetched": successful - cache_hits,
-            "cache_enabled": base_url is not None,
+            "fetched": successful,
         },
         "errors": errors[:10],  # First 10 errors
     }
@@ -510,9 +503,7 @@ async def cache_stats():
         "type": "vercel_edge_cache",
         "player_cache_duration_hours": PLAYER_CACHE_DURATION / 3600,
         "stale_while_revalidate_hours": PLAYER_CACHE_STALE / 3600,
-        "cache_enabled": get_vercel_url() is not None,
-        "vercel_url": get_vercel_url(),
-        "message": "Player profiles are cached at Vercel's edge for 12 hours. Tournament data is never cached."
+        "message": "Player profile endpoints (/api/player/{tag}) are cached at Vercel's edge for 12 hours when accessed directly. Tournament analysis uses direct API calls."
     }
 
 
