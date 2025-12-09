@@ -645,8 +645,8 @@ body {
 /* Tip Footer */
 .tip-footer {
     flex-shrink: 0;
-    padding: 0 0 0.5rem;
-    margin-top: auto;
+    padding: 0 0 1rem;
+    margin-top: 1.5rem;
     width: 100%;
     display: flex;
     justify-content: center;
@@ -844,8 +844,7 @@ body {
 .modal {
     background: linear-gradient(180deg, #e8e0d5 0%, #d9cfc2 100%);
     border-radius: 16px;
-    width: calc(100% - 2rem);
-    max-width: 650px;
+    width: clamp(380px, 78vw, 680px);
     max-height: 85vh;
     overflow: hidden;
     box-shadow: 
