@@ -24,10 +24,19 @@
         <!-- Header with tournament banner -->
         <header class="header">
             <div class="header-banner">
+                <!-- Tournament tag (shown only on results, positioned at top of blue box) -->
+                <div class="header-tag" id="headerTag" style="display: none;"></div>
                 <img src="/assets/images/header-title.png" alt="" class="header-image">
                 <div class="header-text">
-                    <h1 class="header-title">C'est quoi ce niveau ?</h1>
-                    <p class="header-subtitle">Analyse ton tournoi</p>
+                    <h1 class="header-title" id="headerTitle">C'est quoi ce niveau ?</h1>
+                    <p class="header-subtitle" id="headerSubtitle">Analyse ton tournoi</p>
+                    <!-- Progress bar for ongoing tournaments -->
+                    <div class="header-progress" id="headerProgress">
+                        <div class="progress-container">
+                            <div class="progress-fill" id="progressFill"></div>
+                            <span class="progress-text" id="progressText">Fin dans : 0min</span>
+                        </div>
+                    </div>
                 </div>
             </div>
         </header>
@@ -54,13 +63,13 @@
 
             <!-- Results Section (hidden initially) -->
             <section id="resultsSection" class="results-section" style="display: none;">
-                <!-- Tournament Info -->
-                <div class="tournament-info" id="tournamentInfo">
-                    <h2 class="tournament-name" id="tournamentName"></h2>
-                    <div class="tournament-meta">
-                        <span class="tournament-status" id="tournamentStatus"></span>
-                        <span class="tournament-players" id="tournamentPlayers"></span>
-                    </div>
+                <!-- Player Count Bar (like in-game) -->
+                <div class="player-bar">
+                    <img src="/assets/images/icon_tournament.png" alt="" class="player-bar-icon">
+                    <span class="player-bar-text" id="playerBarText">Joueurs : 0/0</span>
+                    <button class="player-bar-info" id="infoBtn" aria-label="Information">
+                        <span class="player-bar-info-icon">i</span>
+                    </button>
                 </div>
 
                 <!-- Analysis Results Panel -->

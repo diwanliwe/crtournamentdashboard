@@ -9,10 +9,10 @@ const TIER_CONFIG = {
     top_10k: { label: 'Top 10K', color: '#f4a261', order: 2 },
     top_50k: { label: 'Top 50K', color: '#e9c46a', order: 3 },
     ever_ranked: { label: 'Classé', color: '#9d4edd', order: 4 },
-    final_league: { label: 'Ligue Ultime', color: '#7b2cbf', order: 5 },
+    final_league: { label: 'Champion Suprême', color: '#7b2cbf', order: 5 },
     reached_12k: { label: '12K+', color: '#2a9d8f', order: 6 },
     trophy_10k_12k: { label: '10K-12K', color: '#219ebc', order: 7 },
-    casual: { label: 'Casual (<10K)', color: '#57cc99', order: 8 },
+    casual: { label: 'Intermédiaire', color: '#57cc99', order: 8 },
     beginner: { label: 'Débutant (<8K)', color: '#6c757d', order: 9 }
 };
 
@@ -35,18 +35,30 @@ const TIP_ROTATION_INTERVAL = 6000; // 6 seconds
 // DOM Elements
 // ===========================================
 
+const appContainer = document.querySelector('.app');
 const tagInput = document.getElementById('tournamentTag');
 const searchBtn = document.getElementById('searchBtn');
 const searchHint = document.getElementById('searchHint');
 const resultsSection = document.getElementById('resultsSection');
-const tournamentName = document.getElementById('tournamentName');
-const tournamentStatus = document.getElementById('tournamentStatus');
-const tournamentPlayers = document.getElementById('tournamentPlayers');
+const headerTag = document.getElementById('headerTag');
+const headerTitle = document.getElementById('headerTitle');
+const headerSubtitle = document.getElementById('headerSubtitle');
+const headerProgress = document.getElementById('headerProgress');
+const progressFill = document.getElementById('progressFill');
+const progressText = document.getElementById('progressText');
+const playerBarText = document.getElementById('playerBarText');
 const analysisTime = document.getElementById('analysisTime');
 const tierList = document.getElementById('tierList');
 const panelFooter = document.getElementById('panelFooter');
 const resetBtn = document.getElementById('resetBtn');
 const tipText = document.getElementById('tipText');
+
+// Default header content (to restore on reset)
+const DEFAULT_TITLE = "C'est quoi ce niveau ?";
+const DEFAULT_SUBTITLE = "Analyse ton tournoi";
+
+// Progress bar update interval
+let progressInterval = null;
 
 // ===========================================
 // State
@@ -161,6 +173,24 @@ function resetSearch() {
     tagInput.value = '';
     tagInput.focus();
     showHint('');
+    
+    // Restore header to default
+    headerTag.style.display = 'none';
+    headerTitle.textContent = DEFAULT_TITLE;
+    headerTitle.classList.remove('tournament-name');
+    headerSubtitle.textContent = DEFAULT_SUBTITLE;
+    headerSubtitle.style.display = 'block';
+    headerProgress.classList.remove('active');
+    
+    // Clear progress interval if running
+    if (progressInterval) {
+        clearInterval(progressInterval);
+        progressInterval = null;
+    }
+    
+    // Remove results-mode class to show search bar
+    appContainer.classList.remove('results-mode');
+    
     // Show tip panel again
     document.querySelector('.tip-footer').style.display = 'flex';
 }
@@ -170,18 +200,37 @@ function resetSearch() {
 // ===========================================
 
 function displayResults(tournament, analysis) {
-    // Tournament info
-    tournamentName.textContent = tournament.name || 'Tournoi';
+    // Update header with tournament info (like in-game)
+    const cleanTag = tagInput.value.trim().replace(/^#/, '');
+    headerTag.textContent = `#${cleanTag.toUpperCase()}`;
+    headerTag.style.display = 'block';
     
-    // Status
-    const statusText = formatStatus(tournament.status);
-    tournamentStatus.textContent = statusText;
-    tournamentStatus.className = 'tournament-status';
-    if (tournament.status === 'ended') tournamentStatus.classList.add('ended');
-    if (tournament.status === 'inProgress') tournamentStatus.classList.add('live');
+    // Tournament name in the blue box (with smaller font class)
+    headerTitle.textContent = tournament.name || 'Tournoi';
+    headerTitle.classList.add('tournament-name');
     
-    // Players count
-    tournamentPlayers.textContent = `${tournament.membersList}/${tournament.maxCapacity} joueurs`;
+    // Handle status display based on tournament state
+    if (tournament.status === 'inProgress' && tournament.startedTime && tournament.duration) {
+        // Show progress bar for ongoing tournaments
+        headerSubtitle.style.display = 'none';
+        headerProgress.classList.add('active');
+        startProgressBar(tournament);
+    } else {
+        // Show status text for ended/preparation
+        headerSubtitle.style.display = 'block';
+        headerProgress.classList.remove('active');
+        headerSubtitle.textContent = formatStatus(tournament.status);
+        if (progressInterval) {
+            clearInterval(progressInterval);
+            progressInterval = null;
+        }
+    }
+    
+    // Player count bar
+    playerBarText.textContent = `Joueurs : ${tournament.membersList}/${tournament.maxCapacity}`;
+    
+    // Add results-mode class to hide search bar
+    appContainer.classList.add('results-mode');
     
     // Analysis time
     analysisTime.textContent = `${analysis.elapsed_seconds}s`;
@@ -295,12 +344,73 @@ function displayTierDistribution(analysis) {
 }
 
 function formatStatus(status) {
+    // Match in-game language
     const statusMap = {
-        'inPreparation': 'En préparation',
-        'inProgress': 'En cours',
-        'ended': 'Terminé'
+        'inPreparation': 'Tournoi en préparation',
+        'inProgress': 'En cours', // Will be replaced by progress bar
+        'ended': 'Tournoi terminé'
     };
     return statusMap[status] || status || 'Inconnu';
+}
+
+// ===========================================
+// Progress Bar for Ongoing Tournaments
+// ===========================================
+
+function startProgressBar(tournament) {
+    // Parse Clash Royale API date format (e.g., "20251120T172936.000Z")
+    const parseApiDate = (dateStr) => {
+        if (!dateStr) return null;
+        // Convert "20251120T172936.000Z" to "2025-11-20T17:29:36.000Z"
+        const formatted = dateStr.replace(
+            /(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})/,
+            '$1-$2-$3T$4:$5:$6'
+        );
+        return new Date(formatted);
+    };
+    
+    const startTime = parseApiDate(tournament.startedTime);
+    const durationMs = tournament.duration * 1000; // Convert to milliseconds
+    const endTime = new Date(startTime.getTime() + durationMs);
+    
+    const updateProgress = () => {
+        const now = new Date();
+        const elapsed = now - startTime;
+        const remaining = endTime - now;
+        
+        if (remaining <= 0) {
+            // Tournament has ended
+            progressFill.style.width = '100%';
+            progressText.textContent = 'Tournoi terminé';
+            if (progressInterval) {
+                clearInterval(progressInterval);
+                progressInterval = null;
+            }
+            return;
+        }
+        
+        // Calculate progress percentage
+        const progress = Math.min((elapsed / durationMs) * 100, 100);
+        progressFill.style.width = `${progress}%`;
+        
+        // Format remaining time
+        const remainingSeconds = Math.floor(remaining / 1000);
+        const hours = Math.floor(remainingSeconds / 3600);
+        const minutes = Math.floor((remainingSeconds % 3600) / 60);
+        const seconds = remainingSeconds % 60;
+        
+        if (hours > 0) {
+            progressText.textContent = `Fin dans : ${hours}h ${minutes}min`;
+        } else if (minutes > 0) {
+            progressText.textContent = `Fin dans : ${minutes}min ${seconds}s`;
+        } else {
+            progressText.textContent = `Fin dans : ${seconds}s`;
+        }
+    };
+    
+    // Update immediately and then every second
+    updateProgress();
+    progressInterval = setInterval(updateProgress, 1000);
 }
 
 // ===========================================
