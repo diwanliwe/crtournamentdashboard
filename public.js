@@ -54,6 +54,8 @@ const tipText = document.getElementById('tipText');
 const infoBtn = document.getElementById('infoBtn');
 const infoModal = document.getElementById('infoModal');
 const modalClose = document.getElementById('modalClose');
+const recentTournamentsEl = document.getElementById('recentTournaments');
+const recentTagsEl = document.getElementById('recentTags');
 
 // Default header content (to restore on reset)
 const DEFAULT_TITLE = "C'est quoi ce niveau ?";
@@ -94,9 +96,85 @@ document.addEventListener('DOMContentLoaded', () => {
     showRandomTip();
     tipInterval = setInterval(rotateTip, TIP_ROTATION_INTERVAL);
     
+    // Load recent tournaments
+    loadRecentTournaments();
+    
     // Focus input on load
     tagInput.focus();
 });
+
+// ===========================================
+// Recent Tournaments
+// ===========================================
+
+// Default tournaments to fill when cache has less than 5
+const DEFAULT_TOURNAMENTS = [
+    { tag: '#2J8YPP8Y', name: 'Default 1' },
+    { tag: '#9G8VVPC9', name: 'Default 2' }
+];
+const MAX_RECENT_DISPLAY = 5;
+
+async function loadRecentTournaments() {
+    let tournaments = [];
+    
+    try {
+        const response = await fetch('/api/tournaments/recent');
+        const data = await response.json();
+        
+        if (response.ok && data.tournaments) {
+            tournaments = data.tournaments;
+        }
+    } catch (error) {
+        console.log('Could not load recent tournaments:', error);
+    }
+    
+    // Fill with defaults if we have less than MAX_RECENT_DISPLAY
+    if (tournaments.length < MAX_RECENT_DISPLAY) {
+        const existingTags = new Set(tournaments.map(t => t.tag.toUpperCase()));
+        
+        for (const defaultT of DEFAULT_TOURNAMENTS) {
+            if (tournaments.length >= MAX_RECENT_DISPLAY) break;
+            // Only add if not already in the list
+            if (!existingTags.has(defaultT.tag.toUpperCase())) {
+                tournaments.push(defaultT);
+                existingTags.add(defaultT.tag.toUpperCase());
+            }
+        }
+    }
+    
+    displayRecentTournaments(tournaments);
+}
+
+function displayRecentTournaments(tournaments) {
+    if (!tournaments || tournaments.length === 0) {
+        recentTournamentsEl.style.display = 'none';
+        return;
+    }
+    
+    // Build HTML for recent tournament tags (just show the tag)
+    let html = '';
+    for (const t of tournaments) {
+        const cleanTag = t.tag.replace(/^#/, '').toUpperCase();
+        html += `<button class="recent-tag" data-tag="${cleanTag}" title="${t.name}">#${cleanTag}</button>`;
+    }
+    
+    recentTagsEl.innerHTML = html;
+    recentTournamentsEl.style.display = 'flex';
+    
+    // Add click handlers to fill the input
+    recentTagsEl.querySelectorAll('.recent-tag').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const tag = btn.getAttribute('data-tag');
+            tagInput.value = `#${tag}`;
+            tagInput.focus();
+            
+            // Track with PostHog
+            if (typeof posthog !== 'undefined') {
+                posthog.capture('recent_tag_clicked', { tag: tag });
+            }
+        });
+    });
+}
 
 // ===========================================
 // Search Flow

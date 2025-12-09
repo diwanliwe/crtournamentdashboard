@@ -101,6 +101,79 @@ async def cache_players(players_data: list[dict]):
     except Exception as e:
         print(f"[KV Cache] Error caching players: {e}")
 
+
+async def add_recent_tournament(tag: str, name: str, player_count: int, status: str):
+    """
+    Add a tournament to the recent tournaments list.
+    Uses a Redis list with LPUSH + LTRIM to keep only the last N tournaments.
+    Deduplicates by tag.
+    """
+    if not KV_ENABLED:
+        return
+    
+    try:
+        # Create tournament entry
+        entry = json.dumps({
+            "tag": tag,
+            "name": name,
+            "playerCount": player_count,
+            "status": status,
+            "searchedAt": datetime.now().isoformat()
+        })
+        
+        # Get current list to check for duplicates
+        current = kv.lrange(RECENT_TOURNAMENTS_KEY, 0, RECENT_TOURNAMENTS_MAX * 2)
+        
+        # Filter out any existing entry with the same tag
+        filtered = []
+        for item in current:
+            try:
+                parsed = json.loads(item) if isinstance(item, str) else item
+                if parsed.get("tag") != tag:
+                    filtered.append(item)
+            except:
+                continue
+        
+        # Use pipeline to rebuild the list atomically
+        pipe = kv.pipeline()
+        pipe.delete(RECENT_TOURNAMENTS_KEY)
+        
+        # Add new entry first (most recent), then existing ones
+        pipe.lpush(RECENT_TOURNAMENTS_KEY, entry)
+        for item in filtered[:RECENT_TOURNAMENTS_MAX - 1]:
+            if isinstance(item, str):
+                pipe.rpush(RECENT_TOURNAMENTS_KEY, item)
+            else:
+                pipe.rpush(RECENT_TOURNAMENTS_KEY, json.dumps(item))
+        
+        # Set TTL on the list
+        pipe.expire(RECENT_TOURNAMENTS_KEY, RECENT_TOURNAMENTS_TTL)
+        pipe.exec()
+        
+        print(f"[Recent] Added tournament: {name} ({tag})")
+    except Exception as e:
+        print(f"[Recent] Error adding tournament: {e}")
+
+
+async def get_recent_tournaments() -> list[dict]:
+    """Get the list of recent tournaments."""
+    if not KV_ENABLED:
+        return []
+    
+    try:
+        items = kv.lrange(RECENT_TOURNAMENTS_KEY, 0, RECENT_TOURNAMENTS_MAX - 1)
+        result = []
+        for item in items:
+            try:
+                parsed = json.loads(item) if isinstance(item, str) else item
+                result.append(parsed)
+            except:
+                continue
+        return result
+    except Exception as e:
+        print(f"[Recent] Error getting tournaments: {e}")
+        return []
+
 # PostHog server-side tracking
 POSTHOG_API_KEY = os.getenv("POSTHOG_KEY", "")
 POSTHOG_HOST = "https://us.i.posthog.com"
@@ -146,6 +219,11 @@ PLAYER_CACHE_STALE = 24 * 60 * 60  # Allow stale for 24 hours while revalidating
 ANALYSIS_CACHE_DURATION = 5 * 60  # 5 minutes for active tournaments
 ANALYSIS_CACHE_STALE = 10 * 60  # 10 minutes stale-while-revalidate
 ANALYSIS_ENDED_CACHE_DURATION = 12 * 60 * 60  # 12 hours for ended tournaments
+
+# Recent tournaments settings
+RECENT_TOURNAMENTS_KEY = "recent_tournaments"
+RECENT_TOURNAMENTS_MAX = 5
+RECENT_TOURNAMENTS_TTL = 7 * 24 * 60 * 60  # 7 days
 
 
 def get_headers():
@@ -478,11 +556,20 @@ async def analyze_tournament(tag: str, response: Response):
 
     members_list = tournament_data.get("membersList", [])
     tournament_status = tournament_data.get("status", "")
+    tournament_name = tournament_data.get("name", "Unknown")
     
     # Analyze all players
     start_time = time.time()
     analysis = await analyze_tournament_players(members_list)
     elapsed = time.time() - start_time
+    
+    # Add to recent tournaments list (non-blocking)
+    await add_recent_tournament(
+        tag=tag,
+        name=tournament_name,
+        player_count=len(members_list),
+        status=tournament_status
+    )
     
     # Set cache duration based on tournament status
     if tournament_status == "ended":
@@ -692,6 +779,23 @@ async def get_player(tag: str, response: Response):
             raise HTTPException(status_code=504, detail="Request timeout")
         except httpx.RequestError as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/tournaments/recent")
+async def get_recent_tournaments_endpoint(response: Response):
+    """
+    Get the list of recently searched tournaments.
+    Returns the last 5 tournaments searched by any user.
+    """
+    tournaments = await get_recent_tournaments()
+    
+    # Short cache for this endpoint (1 minute)
+    response.headers["Cache-Control"] = "public, s-maxage=60, stale-while-revalidate=120"
+    
+    return {
+        "tournaments": tournaments,
+        "count": len(tournaments)
+    }
 
 
 @app.get("/api/cache/stats")
