@@ -12,8 +12,8 @@ const TIER_CONFIG = {
     final_league: { label: 'Champion Suprême', color: '#7b2cbf', order: 5 },
     reached_12k: { label: '12K+', color: '#2a9d8f', order: 6 },
     trophy_10k_12k: { label: '10K-12K', color: '#219ebc', order: 7 },
-    casual: { label: 'Intermédiaire', color: '#57cc99', order: 8 },
-    beginner: { label: 'Débutant (<8K)', color: '#6c757d', order: 9 }
+    casual: { label: 'Casual', sub: '8K-10K', color: '#57cc99', order: 8 },
+    beginner: { label: 'Débutant', sub: '<8K', color: '#6c757d', order: 9 }
 };
 
 const TIPS = [
@@ -52,6 +52,9 @@ const tierList = document.getElementById('tierList');
 const panelFooter = document.getElementById('panelFooter');
 const resetBtn = document.getElementById('resetBtn');
 const tipText = document.getElementById('tipText');
+const infoBtn = document.getElementById('infoBtn');
+const infoModal = document.getElementById('infoModal');
+const modalClose = document.getElementById('modalClose');
 
 // Default header content (to restore on reset)
 const DEFAULT_TITLE = "C'est quoi ce niveau ?";
@@ -79,6 +82,14 @@ document.addEventListener('DOMContentLoaded', () => {
         if (e.key === 'Enter') handleSearch();
     });
     resetBtn.addEventListener('click', resetSearch);
+    
+    // Info modal event listeners
+    infoBtn.addEventListener('click', openInfoModal);
+    modalClose.addEventListener('click', closeInfoModal);
+    infoModal.addEventListener('click', (e) => {
+        // Close when clicking overlay (not modal content)
+        if (e.target === infoModal) closeInfoModal();
+    });
     
     // Start tip rotation
     showRandomTip();
@@ -278,18 +289,11 @@ function displayResults(tournament, analysis) {
     }
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     
-    // Footer stats with cache info
-    let cacheText = '';
-    if (stats.cache_enabled && stats.from_cache > 0) {
-        cacheText = `${stats.from_cache} en cache, ${stats.from_api} téléchargés`;
-    } else if (stats.from_api !== undefined) {
-        cacheText = `${stats.from_api} téléchargés`;
-    }
-    const errorsText = stats.errors > 0 ? `, ${stats.errors} erreurs` : '';
+    // Footer stats (simple - no cache info for social sharing)
+    const errorsText = stats.errors > 0 ? ` (${stats.errors} erreurs)` : '';
     
     panelFooter.innerHTML = `
-        <span>Analysé : ${stats.successful}/${stats.total} joueurs</span>
-        <span class="${stats.errors > 0 ? 'footer-errors' : ''}">${cacheText}${errorsText}</span>
+        <span>Analysé : ${stats.successful}/${stats.total} joueurs${errorsText}</span>
     `;
     
     // Hide tip panel when showing results
@@ -320,10 +324,11 @@ function displayTierDistribution(analysis) {
     let html = '';
     for (const [tier, tierData] of sortedTiers) {
         const config = TIER_CONFIG[tier] || { label: tier, color: '#666' };
+        const subLabel = config.sub ? `<span class="tier-label-sub">${config.sub}</span>` : '';
         html += `
             <div class="tier-row">
                 <div class="tier-color" style="background: ${config.color};"></div>
-                <div class="tier-label">${config.label}</div>
+                <div class="tier-label">${config.label}${subLabel}</div>
                 <div class="tier-bar-container">
                     <div class="tier-bar" style="width: ${tierData.percent}%; background: ${config.color};"></div>
                 </div>
@@ -435,4 +440,31 @@ function rotateTip() {
         tipText.classList.remove('fade');
     }, 300);
 }
+
+// ===========================================
+// Info Modal
+// ===========================================
+
+function openInfoModal() {
+    infoModal.classList.add('active');
+    document.body.style.overflow = 'hidden'; // Prevent background scroll
+    
+    // Track with PostHog
+    if (typeof posthog !== 'undefined') {
+        posthog.capture('info_button_clicked');
+        console.log('[PostHog] Event captured: info_button_clicked');
+    }
+}
+
+function closeInfoModal() {
+    infoModal.classList.remove('active');
+    document.body.style.overflow = ''; // Restore scroll
+}
+
+// Close modal with Escape key
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && infoModal.classList.contains('active')) {
+        closeInfoModal();
+    }
+});
 

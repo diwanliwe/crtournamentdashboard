@@ -100,6 +100,47 @@
         </footer>
     </div>
 
+    <!-- Info Modal -->
+    <div class="modal-overlay" id="infoModal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2 class="modal-title">Comment ça fonctionne ?</h2>
+                <button class="modal-close" id="modalClose" aria-label="Fermer">
+                    <div class="modal-close-highlight"></div>
+                    <span class="modal-close-x">✕</span>
+                </button>
+            </div>
+            <div class="modal-body">
+                <!-- Category 1: Season Rankings -->
+                <div class="modal-card">
+                    <img src="/assets/images/icon_explain.png" alt="" class="modal-card-icon">
+                    <div class="modal-card-content">
+                        <h3 class="modal-card-title">Les classements de saison</h3>
+                        <p class="modal-card-text">Top 1K, Top 10K et Champion Suprême identifient les joueurs qui ont terminé ou sont actuellement dans ces classements lors d'une saison.</p>
+                    </div>
+                </div>
+                
+                <!-- Category 2: Current Trophies -->
+                <div class="modal-card">
+                    <img src="/assets/images/icon_battle.png" alt="" class="modal-card-icon">
+                    <div class="modal-card-content">
+                        <h3 class="modal-card-title">Les trophées actuels</h3>
+                        <p class="modal-card-text">10K-12K, Intermédiaire et Débutant sont basés sur le nombre de trophées actuels du joueur.</p>
+                    </div>
+                </div>
+                
+                <!-- Category 3: Current Level -->
+                <div class="modal-card">
+                    <img src="/assets/images/icon_friends.png" alt="" class="modal-card-icon">
+                    <div class="modal-card-content">
+                        <h3 class="modal-card-title">Niveau actuel des joueurs</h3>
+                        <p class="modal-card-text">L'analyse montre le niveau actuel des joueurs, pas leur niveau au moment du tournoi. Les profils sont sauvegardés 12h pour accélérer les analyses.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="/public.js"></script>
 </body>
 </html>
