@@ -254,11 +254,18 @@ async function analyzeTourn(tag, cardIndex) {
     const cleanTag = tag.replace(/^#/, '');
 
     try {
+        console.log(`🔍 Fetching analysis for #${cleanTag}...`);
         const response = await fetch(`/api/tournament/${cleanTag}/analyze`);
+        
+        // Check Vercel cache header
+        const cacheStatus = response.headers.get('x-vercel-cache') || 'N/A';
+        const cacheEmoji = cacheStatus === 'HIT' ? '✅' : (cacheStatus === 'STALE' ? '🔄' : '❌');
+        console.log(`${cacheEmoji} Cache status: ${cacheStatus}`);
+        
         const data = await response.json();
 
         if (response.ok) {
-            displayAnalysis(cardIndex, data);
+            displayAnalysis(cardIndex, data, cacheStatus);
         } else {
             displayAnalysisError(cardIndex, data.detail || data.error || 'Analysis failed');
         }
@@ -272,11 +279,39 @@ async function analyzeTourn(tag, cardIndex) {
     }
 }
 
-function displayAnalysis(cardIndex, data) {
+function displayAnalysis(cardIndex, data, cacheStatus = 'N/A') {
     const card = document.querySelector(`.tournament-card[data-index="${cardIndex}"]`);
     const analysisResults = card.querySelector('.analysis-results');
     const tierBarsContainer = analysisResults.querySelector('.tier-bars');
     const timeEl = analysisResults.querySelector('.analysis-time');
+    
+    // Log cache information to console
+    const stats = data.analysis.stats;
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log(`📊 Analysis: ${data.tournament.name}`);
+    console.log(`⏱️  Time: ${data.elapsed_seconds}s`);
+    console.log(`👥 Players: ${stats.successful}/${stats.total}`);
+    
+    // KV Cache stats (the important ones!)
+    if (stats.cache_enabled) {
+        console.log(`💾 FROM CACHE: ${stats.from_cache} players`);
+        console.log(`🌐 FROM API: ${stats.from_api} players`);
+        const cachePercent = stats.successful > 0 ? Math.round(stats.from_cache / stats.successful * 100) : 0;
+        console.log(`📈 Cache hit rate: ${cachePercent}%`);
+        
+        if (stats.from_cache > 0 && stats.from_api === 0) {
+            console.log(`✅ 100% from cache - No API calls needed!`);
+        } else if (stats.from_cache > 0) {
+            console.log(`✅ Saved ${stats.from_cache} API calls thanks to cache`);
+        }
+    } else {
+        console.log(`⚠️ KV Cache not enabled`);
+    }
+    
+    if (stats.errors > 0) {
+        console.log(`❌ Errors: ${stats.errors}`);
+    }
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     
     // Update time
     timeEl.textContent = `${data.elapsed_seconds}s`;
@@ -309,13 +344,19 @@ function displayAnalysis(cardIndex, data) {
         `;
     }
     
-    // Add stats footer
-    const stats = data.analysis.stats;
-    const errorsText = stats.errors > 0 ? `${stats.errors} errors` : 'no errors';
+    // Add stats footer with cache info
+    const footerStats = data.analysis.stats;
+    let cacheText = '';
+    if (footerStats.cache_enabled && footerStats.from_cache > 0) {
+        cacheText = `${footerStats.from_cache} cached, ${footerStats.from_api} fetched`;
+    } else {
+        cacheText = `${footerStats.from_api || footerStats.successful} fetched`;
+    }
+    const errorsText = footerStats.errors > 0 ? `, ${footerStats.errors} errors` : '';
     html += `
         <div class="analysis-footer">
-            <span>${stats.successful}/${stats.total} players</span>
-            <span class="${stats.errors > 0 ? 'error-info' : 'fetch-info'}">${errorsText}</span>
+            <span>Analysé : ${footerStats.successful}/${footerStats.total} joueurs</span>
+            <span class="${footerStats.errors > 0 ? 'error-info' : 'fetch-info'}">${cacheText}${errorsText}</span>
         </div>
     `;
     

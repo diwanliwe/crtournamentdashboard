@@ -189,11 +189,58 @@ function displayResults(tournament, analysis) {
     // Tier distribution
     displayTierDistribution(analysis.analysis);
     
-    // Footer stats
+    // Log cache stats to console
     const stats = analysis.analysis.stats;
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log(`📊 Analysis: ${tournament.name}`);
+    console.log(`⏱️  Time: ${analysis.elapsed_seconds}s`);
+    console.log(`👥 Players: ${stats.successful}/${stats.total}`);
+    
+    if (stats.cache_enabled) {
+        console.log(`💾 FROM CACHE: ${stats.from_cache} players`);
+        console.log(`🌐 FROM API: ${stats.from_api} players`);
+        const cachePercent = stats.successful > 0 ? Math.round(stats.from_cache / stats.successful * 100) : 0;
+        console.log(`📈 Cache hit rate: ${cachePercent}%`);
+        
+        // Show cache timing info
+        if (stats.cache_info && stats.cache_info.oldest_cached_at) {
+            const cachedAt = new Date(stats.cache_info.oldest_cached_at);
+            const expiresAt = new Date(stats.cache_info.expires_at);
+            const now = new Date();
+            const minutesRemaining = Math.round((expiresAt - now) / 1000 / 60);
+            
+            console.log(`🕐 Oldest cache: ${cachedAt.toLocaleTimeString()}`);
+            if (minutesRemaining > 0) {
+                const hoursRemaining = Math.floor(minutesRemaining / 60);
+                const mins = minutesRemaining % 60;
+                console.log(`⏳ Expires in: ${hoursRemaining}h ${mins}m`);
+            } else {
+                console.log(`⏳ Cache expired (will refresh on next fetch)`);
+            }
+        }
+        
+        if (stats.from_cache > 0 && stats.from_api === 0) {
+            console.log(`✅ 100% from cache - No API calls needed!`);
+        } else if (stats.from_cache > 0) {
+            console.log(`✅ Saved ${stats.from_cache} API calls thanks to cache`);
+        }
+    } else {
+        console.log(`⚠️ KV Cache not enabled`);
+    }
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    
+    // Footer stats with cache info
+    let cacheText = '';
+    if (stats.cache_enabled && stats.from_cache > 0) {
+        cacheText = `${stats.from_cache} en cache, ${stats.from_api} téléchargés`;
+    } else if (stats.from_api !== undefined) {
+        cacheText = `${stats.from_api} téléchargés`;
+    }
+    const errorsText = stats.errors > 0 ? `, ${stats.errors} erreurs` : '';
+    
     panelFooter.innerHTML = `
         <span>Analysé : ${stats.successful}/${stats.total} joueurs</span>
-        <span class="${stats.errors > 0 ? 'footer-errors' : ''}">${stats.errors > 0 ? stats.errors + ' erreurs' : 'Aucune erreur'}</span>
+        <span class="${stats.errors > 0 ? 'footer-errors' : ''}">${cacheText}${errorsText}</span>
     `;
     
     // Hide tip panel when showing results

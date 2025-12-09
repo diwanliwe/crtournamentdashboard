@@ -1,5 +1,6 @@
 import os
 import time
+import json
 from datetime import datetime
 from urllib.parse import quote
 
@@ -11,6 +12,94 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = FastAPI()
+
+# ============================================================
+# Upstash KV Cache Setup
+# ============================================================
+from upstash_redis import Redis
+
+# Initialize Upstash Redis client (uses KV_REST_API_URL and KV_REST_API_TOKEN)
+kv_url = os.getenv("KV_REST_API_URL")
+kv_token = os.getenv("KV_REST_API_TOKEN")
+
+if kv_url and kv_token:
+    kv = Redis(url=kv_url, token=kv_token)
+    KV_ENABLED = True
+    print("[KV Cache] Upstash Redis connected")
+else:
+    kv = None
+    KV_ENABLED = False
+    print("[KV Cache] Not configured - missing KV_REST_API_URL or KV_REST_API_TOKEN")
+
+# Cache TTL for player data (12 hours in seconds)
+PLAYER_KV_TTL = 12 * 60 * 60
+
+
+def get_player_cache_key(tag: str) -> str:
+    """Generate cache key for a player tag."""
+    # Normalize tag (ensure it starts with #)
+    if not tag.startswith("#"):
+        tag = "#" + tag
+    return f"player:{tag}"
+
+
+async def get_cached_players(tags: list[str]) -> dict:
+    """
+    Get multiple players from KV cache.
+    Returns dict of {tag: classification_data} for found players.
+    """
+    if not KV_ENABLED or not tags:
+        return {}
+    
+    try:
+        # Build cache keys
+        keys = [get_player_cache_key(tag) for tag in tags]
+        
+        # MGET all keys at once (1 command for many keys)
+        results = kv.mget(*keys)
+        
+        cached = {}
+        for i, result in enumerate(results):
+            if result is not None:
+                # Parse JSON if it's a string
+                if isinstance(result, str):
+                    cached[tags[i]] = json.loads(result)
+                else:
+                    cached[tags[i]] = result
+        
+        return cached
+    except Exception as e:
+        print(f"[KV Cache] Error getting players: {e}")
+        return {}
+
+
+async def cache_players(players_data: list[dict]):
+    """
+    Cache multiple players to KV.
+    Each player_data should have 'tag' and 'classification' keys.
+    """
+    if not KV_ENABLED or not players_data:
+        return
+    
+    try:
+        # Use pipeline for batch set with TTL
+        pipe = kv.pipeline()
+        
+        for player in players_data:
+            tag = player.get("tag", "")
+            if tag:
+                key = get_player_cache_key(tag)
+                # Store classification + metadata
+                data = {
+                    "name": player.get("name", ""),
+                    "classification": player.get("classification", {}),
+                    "cached_at": datetime.now().isoformat()
+                }
+                pipe.setex(key, PLAYER_KV_TTL, json.dumps(data))
+        
+        pipe.exec()
+    except Exception as e:
+        print(f"[KV Cache] Error caching players: {e}")
 
 # PostHog server-side tracking
 POSTHOG_API_KEY = os.getenv("POSTHOG_KEY", "")
@@ -52,6 +141,11 @@ API_KEY = os.getenv("CR_API_KEY", "")
 # Cache duration for player profiles (12 hours = 43200 seconds)
 PLAYER_CACHE_DURATION = 12 * 60 * 60  # 12 hours in seconds
 PLAYER_CACHE_STALE = 24 * 60 * 60  # Allow stale for 24 hours while revalidating
+
+# Cache duration for tournament analysis (shorter - tournaments are dynamic)
+ANALYSIS_CACHE_DURATION = 5 * 60  # 5 minutes for active tournaments
+ANALYSIS_CACHE_STALE = 10 * 60  # 10 minutes stale-while-revalidate
+ANALYSIS_ENDED_CACHE_DURATION = 12 * 60 * 60  # 12 hours for ended tournaments
 
 
 def get_headers():
@@ -186,18 +280,26 @@ def get_vercel_url():
 
 async def analyze_tournament_players(members_list):
     """
-    Analyze all players in a tournament using async fetching.
-    Returns dict with players list and summary stats.
+    Analyze all players in a tournament using KV cache + async fetching.
     
-    Note: Uses direct API calls (not cached endpoint) because serverless
-    functions calling themselves via HTTP causes issues on Vercel.
-    Individual player lookups from the frontend still benefit from edge caching.
+    Flow:
+    1. Get all player tags from tournament
+    2. Check KV cache for existing player data
+    3. Only fetch NEW players from Clash Royale API
+    4. Cache the new players
+    5. Return merged results
+    
+    This dramatically reduces API calls when:
+    - Same tournament is analyzed multiple times
+    - Same players appear in different tournaments
     """
     total = len(members_list)
     results = []
     errors = []
+    cache_hits = 0
+    api_fetches = 0
     
-    # Initialize summary counters (updated for Dec 2024 trophy changes)
+    # Initialize summary counters
     tier_counts = {
         "top_1k": 0,
         "top_10k": 0,
@@ -212,36 +314,92 @@ async def analyze_tournament_players(members_list):
     
     start_time = time.time()
     
-    # Use async client with connection pooling - direct API calls
-    async with httpx.AsyncClient() as client:
-        # Create tasks for all players (with semaphore to limit concurrency)
-        semaphore = asyncio.Semaphore(30)  # Limit concurrent requests
+    # Step 1: Extract all player tags
+    all_tags = []
+    tag_to_member = {}
+    for member in members_list:
+        tag = member.get("tag", "")
+        if tag:
+            if not tag.startswith("#"):
+                tag = "#" + tag
+            all_tags.append(tag)
+            tag_to_member[tag] = member
+    
+    # Step 2: Check KV cache for all players
+    cached_players = await get_cached_players(all_tags)
+    cache_hits = len(cached_players)
+    
+    # Process cached players and track oldest cache time
+    oldest_cache_time = None
+    
+    for tag, cached_data in cached_players.items():
+        member = tag_to_member.get(tag, {})
+        classification = cached_data.get("classification", {})
         
-        async def fetch_with_semaphore(member):
-            async with semaphore:
-                player_tag = member.get("tag", "")
-                # Always use direct API calls (base_url=None)
-                tag, player_data, error, _ = await fetch_player_from_api(client, player_tag, None)
-                return (member, tag, player_data, error)
+        # Track oldest cache time
+        cached_at = cached_data.get("cached_at")
+        if cached_at:
+            if oldest_cache_time is None or cached_at < oldest_cache_time:
+                oldest_cache_time = cached_at
         
-        tasks = [fetch_with_semaphore(member) for member in members_list]
-        
-        for coro in asyncio.as_completed(tasks):
-            member, tag, player_data, error = await coro
+        if classification and classification.get("tier"):
+            tier_counts[classification["tier"]] += 1
+            results.append({
+                "tag": tag,
+                "name": cached_data.get("name", member.get("name", "Unknown")),
+                "tournamentRank": member.get("rank"),
+                "tournamentScore": member.get("score"),
+                "classification": classification,
+                "_fromCache": True,
+            })
+    
+    # Step 3: Find players NOT in cache
+    tags_to_fetch = [tag for tag in all_tags if tag not in cached_players]
+    
+    # Step 4: Fetch missing players from API
+    new_players_to_cache = []
+    
+    if tags_to_fetch:
+        async with httpx.AsyncClient() as client:
+            semaphore = asyncio.Semaphore(30)
             
-            if error:
-                errors.append({"tag": tag, "error": error})
-            elif player_data:
-                classification = classify_player(player_data)
-                tier_counts[classification["tier"]] += 1
+            async def fetch_with_semaphore(tag):
+                async with semaphore:
+                    return await fetch_player_from_api(client, tag, None)
+            
+            tasks = [fetch_with_semaphore(tag) for tag in tags_to_fetch]
+            
+            for coro in asyncio.as_completed(tasks):
+                tag, player_data, error, _ = await coro
                 
-                results.append({
-                    "tag": tag,
-                    "name": player_data.get("name", member.get("name", "Unknown")),
-                    "tournamentRank": member.get("rank"),
-                    "tournamentScore": member.get("score"),
-                    "classification": classification,
-                })
+                if error:
+                    errors.append({"tag": tag, "error": error})
+                elif player_data:
+                    api_fetches += 1
+                    classification = classify_player(player_data)
+                    tier_counts[classification["tier"]] += 1
+                    
+                    member = tag_to_member.get(tag, {})
+                    player_result = {
+                        "tag": tag,
+                        "name": player_data.get("name", member.get("name", "Unknown")),
+                        "tournamentRank": member.get("rank"),
+                        "tournamentScore": member.get("score"),
+                        "classification": classification,
+                        "_fromCache": False,
+                    }
+                    results.append(player_result)
+                    
+                    # Prepare for caching
+                    new_players_to_cache.append({
+                        "tag": tag,
+                        "name": player_data.get("name", ""),
+                        "classification": classification,
+                    })
+    
+    # Step 5: Cache new players
+    if new_players_to_cache:
+        await cache_players(new_players_to_cache)
     
     elapsed = time.time() - start_time
     
@@ -254,6 +412,21 @@ async def analyze_tournament_players(members_list):
             "percent": round(count / successful * 100, 1) if successful > 0 else 0
         }
     
+    # Calculate cache expiry time if we have cached data
+    cache_info = {}
+    if oldest_cache_time and cache_hits > 0:
+        try:
+            from datetime import datetime, timedelta
+            cached_dt = datetime.fromisoformat(oldest_cache_time.replace('Z', '+00:00'))
+            expires_dt = cached_dt + timedelta(seconds=PLAYER_KV_TTL)
+            cache_info = {
+                "oldest_cached_at": oldest_cache_time,
+                "expires_at": expires_dt.isoformat(),
+                "ttl_hours": PLAYER_KV_TTL / 3600,
+            }
+        except:
+            pass
+    
     return {
         "players": results,
         "summary": summary,
@@ -261,17 +434,24 @@ async def analyze_tournament_players(members_list):
             "total": total,
             "successful": successful,
             "errors": len(errors),
-            "fetched": successful,
+            "from_cache": cache_hits,
+            "from_api": api_fetches,
+            "cache_enabled": KV_ENABLED,
+            "cache_info": cache_info,
         },
-        "errors": errors[:10],  # First 10 errors
+        "errors": errors[:10],
     }
 
 
 @app.get("/api/tournament/{tag:path}/analyze")
-async def analyze_tournament(tag: str):
+async def analyze_tournament(tag: str, response: Response):
     """
     Analyze all players in a tournament.
     This fetches each player's profile and classifies them.
+    
+    Cached at Vercel's edge:
+    - Ended tournaments: 12 hours
+    - Active/prep tournaments: 5 minutes
     """
     if not API_KEY:
         raise HTTPException(status_code=500, detail="API key not configured")
@@ -283,25 +463,41 @@ async def analyze_tournament(tag: str):
     # First, fetch the tournament to get members list
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.get(
+            api_response = await client.get(
                 f"{CR_API_BASE}/tournaments/{encoded_tag}",
                 headers=get_headers(),
                 timeout=10.0
             )
             
-            if response.status_code != 200:
-                raise HTTPException(status_code=response.status_code, detail=f"Tournament API error: {response.status_code}")
+            if api_response.status_code != 200:
+                raise HTTPException(status_code=api_response.status_code, detail=f"Tournament API error: {api_response.status_code}")
             
-            tournament_data = response.json()
+            tournament_data = api_response.json()
         except httpx.RequestError as e:
             raise HTTPException(status_code=500, detail=f"Failed to fetch tournament: {e}")
 
     members_list = tournament_data.get("membersList", [])
+    tournament_status = tournament_data.get("status", "")
     
     # Analyze all players
     start_time = time.time()
     analysis = await analyze_tournament_players(members_list)
     elapsed = time.time() - start_time
+    
+    # Set cache duration based on tournament status
+    if tournament_status == "ended":
+        # Ended tournaments can be cached for 12 hours
+        cache_duration = ANALYSIS_ENDED_CACHE_DURATION
+        stale_duration = ANALYSIS_ENDED_CACHE_DURATION
+    else:
+        # Active/prep tournaments cached for 5 minutes
+        cache_duration = ANALYSIS_CACHE_DURATION
+        stale_duration = ANALYSIS_CACHE_STALE
+    
+    # Set Vercel edge cache headers
+    response.headers["Cache-Control"] = f"public, s-maxage={cache_duration}, stale-while-revalidate={stale_duration}"
+    response.headers["CDN-Cache-Control"] = f"public, max-age={cache_duration}"
+    response.headers["Vercel-CDN-Cache-Control"] = f"public, max-age={cache_duration}"
 
     return {
         "tournament": {
@@ -313,6 +509,8 @@ async def analyze_tournament(tag: str):
         },
         "analysis": analysis,
         "elapsed_seconds": round(elapsed, 1),
+        "_cached_at": datetime.now().isoformat(),
+        "_cache_duration_seconds": cache_duration,
     }
 
 
@@ -499,12 +697,28 @@ async def get_player(tag: str, response: Response):
 @app.get("/api/cache/stats")
 async def cache_stats():
     """Get cache configuration info."""
-    return {
-        "type": "vercel_edge_cache",
-        "player_cache_duration_hours": PLAYER_CACHE_DURATION / 3600,
-        "stale_while_revalidate_hours": PLAYER_CACHE_STALE / 3600,
-        "message": "Player profile endpoints (/api/player/{tag}) are cached at Vercel's edge for 12 hours when accessed directly. Tournament analysis uses direct API calls."
+    stats = {
+        "kv_cache": {
+            "enabled": KV_ENABLED,
+            "type": "upstash_redis",
+            "ttl_hours": PLAYER_KV_TTL / 3600,
+        },
+        "edge_cache": {
+            "player_cache_hours": PLAYER_CACHE_DURATION / 3600,
+            "stale_while_revalidate_hours": PLAYER_CACHE_STALE / 3600,
+        },
+        "message": "Player classifications are cached in Upstash KV for 12 hours. Tournament analysis checks cache first, only fetches new players from API."
     }
+    
+    # Try to get some cache info from KV
+    if KV_ENABLED:
+        try:
+            info = kv.dbsize()
+            stats["kv_cache"]["total_keys"] = info
+        except:
+            pass
+    
+    return stats
 
 
 @app.post("/api/cache/clear")
