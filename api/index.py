@@ -4,7 +4,7 @@ from datetime import datetime
 from urllib.parse import quote
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
@@ -48,6 +48,10 @@ app.add_middleware(
 
 CR_API_BASE = "https://proxy.royaleapi.dev/v1"
 API_KEY = os.getenv("CR_API_KEY", "")
+
+# Cache duration for player profiles (12 hours = 43200 seconds)
+PLAYER_CACHE_DURATION = 12 * 60 * 60  # 12 hours in seconds
+PLAYER_CACHE_STALE = 24 * 60 * 60  # Allow stale for 24 hours while revalidating
 
 
 def get_headers():
@@ -118,48 +122,80 @@ def classify_player(player_data):
         return {"tier": "beginner", "label": "Débutant (<8K)", "trophies": base_trophies, "priority": 9}
 
 
-async def fetch_player_from_api(client: httpx.AsyncClient, tag: str):
-    """Fetch a single player from API. Returns (tag, data, error)."""
+async def fetch_player_from_api(client: httpx.AsyncClient, tag: str, base_url: str = None):
+    """
+    Fetch a single player from API. Returns (tag, data, error, was_cached).
+    If base_url is provided, fetches through our cached endpoint.
+    Otherwise, fetches directly from CR API.
+    """
     if not tag.startswith("#"):
         tag = "#" + tag
     
     encoded_tag = quote(tag, safe="")
     try:
-        response = await client.get(
-            f"{CR_API_BASE}/players/{encoded_tag}",
-            headers=get_headers(),
-            timeout=15.0
-        )
+        if base_url:
+            # Fetch through our cached endpoint (hits Vercel edge cache)
+            response = await client.get(
+                f"{base_url}/api/player/{encoded_tag}",
+                timeout=15.0
+            )
+        else:
+            # Direct API call (no caching)
+            response = await client.get(
+                f"{CR_API_BASE}/players/{encoded_tag}",
+                headers=get_headers(),
+                timeout=15.0
+            )
         
         if response.status_code == 200:
             data = response.json()
-            data["_cachedAt"] = datetime.now().isoformat()
-            return (tag, data, None)
+            # Check if response came from cache (Vercel adds x-vercel-cache header)
+            was_cached = response.headers.get("x-vercel-cache") == "HIT"
+            if "_cachedAt" not in data:
+                data["_cachedAt"] = datetime.now().isoformat()
+            return (tag, data, None, was_cached)
         elif response.status_code == 404:
-            return (tag, None, "Player not found")
+            return (tag, None, "Player not found", False)
         elif response.status_code == 429:
             # Rate limited - wait and retry once
             await asyncio.sleep(2)
-            return await fetch_player_from_api(client, tag)
+            return await fetch_player_from_api(client, tag, base_url)
         else:
-            return (tag, None, f"API error: {response.status_code}")
+            return (tag, None, f"API error: {response.status_code}", False)
     except httpx.TimeoutException:
-        return (tag, None, "Timeout")
+        return (tag, None, "Timeout", False)
     except Exception as e:
-        return (tag, None, str(e))
+        return (tag, None, str(e), False)
 
 
 import asyncio
 
+# Get the base URL for internal API calls (for caching)
+def get_vercel_url():
+    """Get the Vercel deployment URL for internal cached API calls."""
+    # Vercel sets these environment variables
+    vercel_url = os.environ.get("VERCEL_URL")
+    if vercel_url:
+        return f"https://{vercel_url}"
+    # Fallback for production domain
+    vercel_project_url = os.environ.get("VERCEL_PROJECT_PRODUCTION_URL")
+    if vercel_project_url:
+        return f"https://{vercel_project_url}"
+    return None
 
-async def analyze_tournament_players(members_list):
+
+async def analyze_tournament_players(members_list, use_cache: bool = True):
     """
     Analyze all players in a tournament using async fetching.
     Returns dict with players list and summary stats.
+    
+    When use_cache=True and running on Vercel, fetches through our cached
+    player endpoint to leverage Vercel's edge cache for 12-hour caching.
     """
     total = len(members_list)
     results = []
     errors = []
+    cache_hits = 0
     
     # Initialize summary counters (updated for Dec 2024 trophy changes)
     tier_counts = {
@@ -176,6 +212,9 @@ async def analyze_tournament_players(members_list):
     
     start_time = time.time()
     
+    # Get base URL for cached requests (only on Vercel)
+    base_url = get_vercel_url() if use_cache else None
+    
     # Use async client with connection pooling
     async with httpx.AsyncClient() as client:
         # Create tasks for all players (with semaphore to limit concurrency)
@@ -184,13 +223,16 @@ async def analyze_tournament_players(members_list):
         async def fetch_with_semaphore(member):
             async with semaphore:
                 player_tag = member.get("tag", "")
-                tag, player_data, error = await fetch_player_from_api(client, player_tag)
-                return (member, tag, player_data, error)
+                tag, player_data, error, was_cached = await fetch_player_from_api(client, player_tag, base_url)
+                return (member, tag, player_data, error, was_cached)
         
         tasks = [fetch_with_semaphore(member) for member in members_list]
         
         for coro in asyncio.as_completed(tasks):
-            member, tag, player_data, error = await coro
+            member, tag, player_data, error, was_cached = await coro
+            
+            if was_cached:
+                cache_hits += 1
             
             if error:
                 errors.append({"tag": tag, "error": error})
@@ -224,8 +266,9 @@ async def analyze_tournament_players(members_list):
             "total": total,
             "successful": successful,
             "errors": len(errors),
-            "cached": 0,  # No caching in serverless
-            "fetched": successful,
+            "cached": cache_hits,
+            "fetched": successful - cache_hits,
+            "cache_enabled": base_url is not None,
         },
         "errors": errors[:10],  # First 10 errors
     }
@@ -368,8 +411,11 @@ async def get_tournament(tag: str):
 
 
 @app.get("/api/player/{tag:path}/classify")
-async def classify_player_endpoint(tag: str):
-    """Fetch player profile and return their classification."""
+async def classify_player_endpoint(tag: str, response: Response):
+    """
+    Fetch player profile and return their classification.
+    Cached for 12 hours at Vercel's edge.
+    """
     if not API_KEY:
         raise HTTPException(status_code=500, detail="API key not configured")
 
@@ -380,20 +426,25 @@ async def classify_player_endpoint(tag: str):
     
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.get(
+            api_response = await client.get(
                 f"{CR_API_BASE}/players/{encoded_tag}",
                 headers=get_headers(),
                 timeout=10.0
             )
-            if response.status_code != 200:
-                raise HTTPException(status_code=response.status_code, detail=f"API error: {response.status_code}")
+            if api_response.status_code != 200:
+                raise HTTPException(status_code=api_response.status_code, detail=f"API error: {api_response.status_code}")
             
-            player_data = response.json()
+            player_data = api_response.json()
         except httpx.RequestError as e:
             raise HTTPException(status_code=500, detail=str(e))
 
     # Classify the player
     classification = classify_player(player_data)
+    
+    # Set Vercel edge cache headers
+    response.headers["Cache-Control"] = f"public, s-maxage={PLAYER_CACHE_DURATION}, stale-while-revalidate={PLAYER_CACHE_STALE}"
+    response.headers["CDN-Cache-Control"] = f"public, max-age={PLAYER_CACHE_DURATION}"
+    response.headers["Vercel-CDN-Cache-Control"] = f"public, max-age={PLAYER_CACHE_DURATION}"
     
     return {
         "tag": player_data.get("tag"),
@@ -405,13 +456,16 @@ async def classify_player_endpoint(tag: str):
             "last": player_data.get("lastPathOfLegendSeasonResult"),
             "best": player_data.get("bestPathOfLegendSeasonResult"),
         },
-        "_cached": False
+        "_cachedAt": datetime.now().isoformat()
     }
 
 
 @app.get("/api/player/{tag:path}")
-async def get_player(tag: str):
-    """Get player profile."""
+async def get_player(tag: str, response: Response):
+    """
+    Get player profile with Vercel edge caching.
+    Cached for 12 hours, serves stale while revalidating for up to 24 hours.
+    """
     if not API_KEY:
         raise HTTPException(status_code=500, detail="API key not configured")
 
@@ -422,20 +476,26 @@ async def get_player(tag: str):
 
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.get(
+            api_response = await client.get(
                 f"{CR_API_BASE}/players/{encoded_tag}",
                 headers=get_headers(),
                 timeout=10.0
             )
 
-            if response.status_code == 200:
-                data = response.json()
-                data["_cached"] = False
+            if api_response.status_code == 200:
+                data = api_response.json()
+                data["_cachedAt"] = datetime.now().isoformat()
+                
+                # Set Vercel edge cache headers (12 hours cache, 24 hours stale-while-revalidate)
+                response.headers["Cache-Control"] = f"public, s-maxage={PLAYER_CACHE_DURATION}, stale-while-revalidate={PLAYER_CACHE_STALE}"
+                response.headers["CDN-Cache-Control"] = f"public, max-age={PLAYER_CACHE_DURATION}"
+                response.headers["Vercel-CDN-Cache-Control"] = f"public, max-age={PLAYER_CACHE_DURATION}"
+                
                 return data
-            elif response.status_code == 404:
+            elif api_response.status_code == 404:
                 raise HTTPException(status_code=404, detail="Player not found")
             else:
-                raise HTTPException(status_code=response.status_code, detail=f"API error: {response.status_code}")
+                raise HTTPException(status_code=api_response.status_code, detail=f"API error: {api_response.status_code}")
 
         except httpx.TimeoutException:
             raise HTTPException(status_code=504, detail="Request timeout")
@@ -445,18 +505,24 @@ async def get_player(tag: str):
 
 @app.get("/api/cache/stats")
 async def cache_stats():
-    """Get cache statistics (no-op in serverless)."""
+    """Get cache configuration info."""
     return {
-        "totalPlayers": 0,
-        "players": [],
-        "message": "Caching disabled in serverless mode"
+        "type": "vercel_edge_cache",
+        "player_cache_duration_hours": PLAYER_CACHE_DURATION / 3600,
+        "stale_while_revalidate_hours": PLAYER_CACHE_STALE / 3600,
+        "cache_enabled": get_vercel_url() is not None,
+        "vercel_url": get_vercel_url(),
+        "message": "Player profiles are cached at Vercel's edge for 12 hours. Tournament data is never cached."
     }
 
 
 @app.post("/api/cache/clear")
 async def clear_cache():
-    """Clear the player cache (no-op in serverless)."""
-    return {"message": "Cache clearing not applicable in serverless mode"}
+    """Clear the player cache (Vercel edge cache cannot be cleared via API)."""
+    return {
+        "message": "Vercel edge cache automatically expires after 12 hours. To force refresh a specific player, wait for cache expiry or redeploy.",
+        "cache_duration_hours": PLAYER_CACHE_DURATION / 3600
+    }
 
 
 # ============================================================
