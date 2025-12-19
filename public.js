@@ -112,7 +112,7 @@ const DEFAULT_TOURNAMENTS = [
     { tag: '#2J8YPP8Y', name: 'Default 1' },
     { tag: '#9G8VVPC9', name: 'Default 2' }
 ];
-const MAX_RECENT_DISPLAY = 5;
+const MAX_RECENT_DISPLAY = 5; // Limit to 5 for clean single-column display
 
 async function loadRecentTournaments() {
     let tournaments = [];
@@ -151,11 +151,21 @@ function displayRecentTournaments(tournaments) {
         return;
     }
     
-    // Build HTML for recent tournament tags (just show the tag)
+    // Limit to MAX_RECENT_DISPLAY (5) tournaments
+    const displayTournaments = tournaments.slice(0, MAX_RECENT_DISPLAY);
+    
+    // Build HTML for recent tournament tags (name first, tag second)
     let html = '';
-    for (const t of tournaments) {
+    for (const t of displayTournaments) {
         const cleanTag = t.tag.replace(/^#/, '').toUpperCase();
-        html += `<button class="recent-tag" data-tag="${cleanTag}" title="${t.name}">#${cleanTag}</button>`;
+        const tournamentName = t.name || 'Tournoi';
+        
+        html += `
+            <button class="recent-tag" data-tag="${cleanTag}" title="${tournamentName}">
+                <span class="recent-tag-name">${tournamentName}</span>
+                <span class="recent-tag-id">#${cleanTag}</span>
+            </button>
+        `;
     }
     
     recentTagsEl.innerHTML = html;
