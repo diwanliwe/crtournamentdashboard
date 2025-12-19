@@ -1,15 +1,15 @@
-# CR Tournament Dashboard
+# C'est Quoi Ce Niveau ?
 
-A real-time Clash Royale tournament monitoring dashboard built with FastAPI. Track multiple qualifier tournaments simultaneously with live player counts, status updates, and player skill analysis.
+A Clash Royale tournament player analyzer built with FastAPI. Analyze the skill distribution of players in any tournament - find out how many Top 1K, Top 10K, and other ranked players are participating.
 
 ## Features
 
-- Monitor up to 3 tournaments at once
-- Real-time player count tracking
-- Visual progress bars showing tournament capacity
-- Auto-refresh every 5 seconds
-- Tournament status indicators (in preparation, in progress, ended)
-- **Player Analysis**: Classify all players by skill tier (Top 1K, Top 10K, etc.)
+- **Player Distribution Analysis**: See the skill breakdown of all tournament participants
+- **Tier Classification**: Top 1K, Top 10K, Top 50K, Champion Suprême, and more
+- **Tournament Progress**: Live progress bar for ongoing tournaments
+- **Recent Searches**: Quick access to recently analyzed tournaments with names
+- **Player Caching**: Fast re-analysis with 12-hour player data cache (Upstash Redis)
+- **Mobile-First Design**: Beautiful Clash Royale-themed UI that works on all devices
 
 ## Setup
 
@@ -17,12 +17,12 @@ A real-time Clash Royale tournament monitoring dashboard built with FastAPI. Tra
 
 ```bash
 # Create virtual environment
-python3 -m venv venv-fastapi
+python3 -m venv venv
 
 # Activate virtual environment
-source venv-fastapi/bin/activate  # macOS/Linux
+source venv/bin/activate  # macOS/Linux
 # or
-venv-fastapi\Scripts\activate     # Windows
+venv\Scripts\activate     # Windows
 
 # Install requirements
 pip install -r requirements.txt
@@ -46,12 +46,16 @@ Create a `.env` file in the project root:
 
 ```bash
 CR_API_KEY=your_api_key_here
+
+# Optional: Upstash Redis for caching (speeds up repeated analyses)
+UPSTASH_REDIS_URL=your_upstash_redis_url
+UPSTASH_REDIS_TOKEN=your_upstash_redis_token
 ```
 
-### 4. Run the Dashboard
+### 4. Run the App
 
 ```bash
-source venv-fastapi/bin/activate  # Make sure venv is activated
+source venv/bin/activate  # Make sure venv is activated
 uvicorn api.index:app --reload --port 8080
 ```
 
@@ -74,10 +78,11 @@ vercel
 
 ## Usage
 
-1. Enter tournament tags in the input fields (e.g., `#2JYLU8YQ`)
-2. Click **Start Monitoring**
-3. The dashboard will auto-refresh every 5 seconds
-4. Click **Analyze Players** to classify all players by skill tier
+1. Enter a tournament tag in the search field (e.g., `#2JYLU8YQ`)
+2. Click the search button or press Enter
+3. Wait for the analysis to complete (may take up to 30 seconds for large tournaments)
+4. View the player distribution breakdown by skill tier
+5. Use recent searches to quickly re-analyze previous tournaments
 
 ## API Endpoints
 
@@ -86,26 +91,25 @@ vercel
 | GET | `/api/tournament/{tag}` | Get tournament summary |
 | GET | `/api/tournament/{tag}/full` | Get full tournament data with all members |
 | GET | `/api/tournament/{tag}/analyze` | Analyze and classify all players |
+| GET | `/api/tournaments/recent` | Get list of recently analyzed tournaments |
 | GET | `/api/player/{tag}` | Get player profile |
 | GET | `/api/player/{tag}/classify` | Get player classification |
-| GET | `/api/cache/stats` | Cache stats (disabled in serverless) |
-| POST | `/api/cache/clear` | Clear cache (no-op in serverless) |
 
 ## Player Classification Tiers
 
-Players are classified into skill tiers based on their Path of Legends performance:
+Players are classified into skill tiers based on their Path of Legends and trophy performance:
 
-| Tier | Criteria |
-|------|----------|
-| Top 1K | PoL rank ≤ 1,000 |
-| Top 10K | PoL rank ≤ 10,000 |
-| Top 50K | PoL rank ≤ 50,000 |
-| Ever Ranked | Has any PoL rank |
-| Final League | Has PoL trophies but no rank |
-| Reached 15K | Seasonal trophies ≥ 15,000 |
-| Seasonal 10K-15K | Seasonal trophies 10,000-14,999 |
-| Casual | Base trophies 8,000-9,999 |
-| Beginner | Base trophies < 8,000 |
+| Tier | French Label | Criteria |
+|------|--------------|----------|
+| Top 1K | Top 1K | Path of Legends rank ≤ 1,000 |
+| Top 10K | Top 10K | Path of Legends rank ≤ 10,000 |
+| Top 50K | Top 50K | Path of Legends rank ≤ 50,000 |
+| Ever Ranked | Classé | Has any Path of Legends rank |
+| Final League | Champion Suprême | Has reached Ultimate Champion league |
+| Reached 12K+ | 12K+ | Trophies ≥ 12,000 |
+| Trophy 10K-12K | 10K-12K | Trophies 10,000-11,999 |
+| Casual | Casual (8K-10K) | Trophies 8,000-9,999 |
+| Beginner | Débutant (<8K) | Trophies < 8,000 |
 
 ## How the Proxy Works
 
@@ -119,7 +123,9 @@ The proxy forwards your authenticated requests while using a static IP (`45.79.2
 ## Tech Stack
 
 - **Backend**: FastAPI, Python, httpx (async HTTP)
-- **Frontend**: Vanilla JS, CSS
+- **Frontend**: Vanilla JS, CSS (Clash Royale themed)
+- **Caching**: Upstash Redis (12-hour player cache)
+- **Analytics**: PostHog
 - **Deployment**: Vercel Serverless
 - **API**: Clash Royale Official API via RoyaleAPI Proxy
 
@@ -130,9 +136,12 @@ The proxy forwards your authenticated requests while using a static IP (`45.79.2
 ├── api/
 │   └── index.py          # FastAPI application
 ├── public/
-│   ├── index.html        # Dashboard UI
-│   ├── style.css         # Styles
-│   └── script.js         # Frontend logic
+│   ├── index.html        # Main UI
+│   ├── public.css        # Styles (Clash Royale theme)
+│   └── public.js         # Frontend logic
+├── assets/
+│   ├── fonts/            # Clash font
+│   └── images/           # Icons and backgrounds
 ├── data/
 │   └── *.json            # Example API responses
 ├── vercel.json           # Vercel configuration
@@ -142,3 +151,7 @@ The proxy forwards your authenticated requests while using a static IP (`45.79.2
 ## Community Support
 
 Join the [RoyaleAPI Developer Discord](https://discord.gg/royaleapi) for help!
+
+---
+
+**Code Ashtax** dans le magasin pour soutenir les projets ! 🎮
