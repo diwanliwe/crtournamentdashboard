@@ -357,9 +357,9 @@ async function loadTournamentDirect(tag) {
     }
 }
 
-function updateStreamingFooter(processed, total) {
-    // Text stays centered; dots are absolutely positioned outside the text flow
-    panelFooter.innerHTML = `<span class="streaming-footer-wrap">Analyse en cours : ${processed}/${total} joueurs<span class="dots-animation"></span></span>`;
+function updateStreamingFooter(processed, total, isWaiting = false) {
+    const prefix = isWaiting ? 'En attente' : 'Analyse en cours';
+    panelFooter.innerHTML = `<span class="streaming-footer-wrap">${prefix} : ${processed}/${total} joueurs<span class="dots-animation"></span></span>`;
 }
 
 async function handleStreamingAnalysis(cleanTag, tournamentData) {
@@ -378,6 +378,7 @@ async function handleStreamingAnalysis(cleanTag, tournamentData) {
     let lastEvent = null;
     let streamComplete = false;
     let streamTotal = tournamentData.membersList;
+    let isWaiting = false;
 
     while (true) {
         const { done, value } = await reader.read();
@@ -405,14 +406,22 @@ async function handleStreamingAnalysis(cleanTag, tournamentData) {
                     // Show results section early with tournament header + animated footer
                     showStreamingResultsHeader(tournamentData);
                     updateStreamingFooter(0, streamTotal);
+                } else if (event.type === 'waiting') {
+                    isWaiting = true;
+                    showHint(
+                        `Un autre utilisateur analyse ce tournoi, en attente du résultat...`,
+                        false, true
+                    );
+                    updateStreamingFooter(0, streamTotal, true);
                 } else if (event.type === 'progress') {
                     const pct = Math.round((event.processed / event.total) * 100);
+                    const prefix = isWaiting ? 'En attente' : 'Analyse en cours';
                     showHint(
-                        `Analyse en cours : ${event.processed}/${event.total} joueurs (${pct}%)...`,
+                        `${prefix} : ${event.processed}/${event.total} joueurs (${pct}%)...`,
                         false, true
                     );
                     // Update footer counter
-                    updateStreamingFooter(event.processed, event.total);
+                    updateStreamingFooter(event.processed, event.total, isWaiting);
                     // Update tier bars only when we have actual data
                     if (event.batch_summary) {
                         const hasData = Object.values(event.batch_summary).some(t => t.count > 0);

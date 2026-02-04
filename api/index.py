@@ -46,6 +46,118 @@ def get_player_cache_key(tag: str) -> str:
 
 KV_BATCH_SIZE = 500  # Max keys per MGET/pipeline batch (avoids Upstash payload limits)
 
+# Tournament-level result cache + distributed lock settings
+TOURNAMENT_RESULT_TTL_ACTIVE = 5 * 60       # 5 min for active tournaments
+TOURNAMENT_RESULT_TTL_ENDED = 12 * 60 * 60  # 12h for ended tournaments
+TOURNAMENT_LOCK_TTL = 5 * 60                # Lock auto-expires (safety net)
+
+
+def get_tournament_result_key(tag: str) -> str:
+    return f"tournament_result:{tag}"
+
+
+def get_tournament_lock_key(tag: str) -> str:
+    return f"tournament_lock:{tag}"
+
+
+def get_tournament_progress_key(tag: str) -> str:
+    return f"tournament_progress:{tag}"
+
+
+async def get_cached_tournament_result(tag: str) -> dict | None:
+    """Get cached tournament analysis result from Redis."""
+    if not KV_ENABLED:
+        return None
+    try:
+        data = kv.get(get_tournament_result_key(tag))
+        if data is None:
+            return None
+        if isinstance(data, str):
+            return json.loads(data)
+        return data
+    except Exception as e:
+        print(f"[Tournament Cache] Error getting result for {tag}: {e}")
+        return None
+
+
+async def cache_tournament_result(tag: str, result: dict, status: str):
+    """Cache tournament analysis result in Redis with status-based TTL."""
+    if not KV_ENABLED:
+        return
+    try:
+        ttl = TOURNAMENT_RESULT_TTL_ENDED if status == "ended" else TOURNAMENT_RESULT_TTL_ACTIVE
+        kv.setex(get_tournament_result_key(tag), ttl, json.dumps(result))
+        print(f"[Tournament Cache] Cached result for {tag} (TTL={ttl}s)")
+    except Exception as e:
+        print(f"[Tournament Cache] Error caching result for {tag}: {e}")
+
+
+async def try_acquire_lock(tag: str) -> bool:
+    """Try to acquire a distributed lock for tournament analysis. Returns True if acquired."""
+    if not KV_ENABLED:
+        return True  # No KV = always proceed (no coordination)
+    try:
+        result = kv.set(get_tournament_lock_key(tag), time.time(), nx=True, ex=TOURNAMENT_LOCK_TTL)
+        acquired = result is True or result == "OK"
+        print(f"[Tournament Lock] {'Acquired' if acquired else 'Denied'} lock for {tag}")
+        return acquired
+    except Exception as e:
+        print(f"[Tournament Lock] Error acquiring lock for {tag}: {e}")
+        return True  # On error, proceed without coordination
+
+
+async def release_lock(tag: str):
+    """Release the distributed lock for tournament analysis."""
+    if not KV_ENABLED:
+        return
+    try:
+        kv.delete(get_tournament_lock_key(tag))
+        print(f"[Tournament Lock] Released lock for {tag}")
+    except Exception as e:
+        print(f"[Tournament Lock] Error releasing lock for {tag}: {e}")
+
+
+async def update_analysis_progress(tag: str, processed: int, total: int, summary: dict):
+    """Update the analysis progress in Redis so waiters can relay it."""
+    if not KV_ENABLED:
+        return
+    try:
+        progress = json.dumps({
+            "processed": processed,
+            "total": total,
+            "summary": summary,
+            "updated_at": time.time(),
+        })
+        kv.setex(get_tournament_progress_key(tag), 60, progress)
+    except Exception as e:
+        print(f"[Tournament Progress] Error updating progress for {tag}: {e}")
+
+
+async def get_analysis_progress(tag: str) -> dict | None:
+    """Get the current analysis progress from Redis."""
+    if not KV_ENABLED:
+        return None
+    try:
+        data = kv.get(get_tournament_progress_key(tag))
+        if data is None:
+            return None
+        if isinstance(data, str):
+            return json.loads(data)
+        return data
+    except Exception as e:
+        print(f"[Tournament Progress] Error getting progress for {tag}: {e}")
+        return None
+
+
+async def clear_analysis_progress(tag: str):
+    """Delete the progress key after analysis completes."""
+    if not KV_ENABLED:
+        return
+    try:
+        kv.delete(get_tournament_progress_key(tag))
+    except Exception as e:
+        print(f"[Tournament Progress] Error clearing progress for {tag}: {e}")
+
 
 async def get_cached_players(tags: list[str]) -> dict:
     """
@@ -578,12 +690,35 @@ async def analyze_tournament(tag: str, response: Response):
     members_list = tournament_data.get("membersList", [])
     tournament_status = tournament_data.get("status", "")
     tournament_name = tournament_data.get("name", "Unknown")
-    
+
+    # Check tournament-level result cache (Redis KV)
+    cached_result = await get_cached_tournament_result(tag)
+    if cached_result:
+        print(f"[Tournament Cache] HIT for {tag} (non-streaming)")
+        # Set short edge cache headers for cached results
+        response.headers["Cache-Control"] = "public, s-maxage=60, stale-while-revalidate=120"
+        return {
+            "tournament": {
+                "tag": tournament_data.get("tag"),
+                "name": tournament_data.get("name"),
+                "status": tournament_data.get("status"),
+                "capacity": tournament_data.get("capacity"),
+                "maxCapacity": tournament_data.get("maxCapacity"),
+            },
+            "analysis": {
+                "summary": cached_result["summary"],
+                "stats": cached_result["stats"],
+            },
+            "elapsed_seconds": 0,
+            "_cached_at": datetime.now().isoformat(),
+            "_from_tournament_cache": True,
+        }
+
     # Analyze all players
     start_time = time.time()
     analysis = await analyze_tournament_players(members_list)
     elapsed = time.time() - start_time
-    
+
     # Add to recent tournaments list (non-blocking)
     await add_recent_tournament(
         tag=tag,
@@ -591,17 +726,22 @@ async def analyze_tournament(tag: str, response: Response):
         player_count=len(members_list),
         status=tournament_status
     )
-    
+
+    # Cache the tournament result in Redis KV
+    await cache_tournament_result(tag, {
+        "summary": analysis["summary"],
+        "stats": analysis["stats"],
+        "elapsed_seconds": round(elapsed, 1),
+    }, tournament_status)
+
     # Set cache duration based on tournament status
     if tournament_status == "ended":
-        # Ended tournaments can be cached for 12 hours
         cache_duration = ANALYSIS_ENDED_CACHE_DURATION
         stale_duration = ANALYSIS_ENDED_CACHE_DURATION
     else:
-        # Active/prep tournaments cached for 5 minutes
         cache_duration = ANALYSIS_CACHE_DURATION
         stale_duration = ANALYSIS_CACHE_STALE
-    
+
     # Set Vercel edge cache headers
     response.headers["Cache-Control"] = f"public, s-maxage={cache_duration}, stale-while-revalidate={stale_duration}"
     response.headers["CDN-Cache-Control"] = f"public, max-age={cache_duration}"
@@ -631,8 +771,12 @@ async def analyze_tournament_stream(tag: str):
     Streaming analysis for large tournaments (1K+ players).
     Streams NDJSON events as players are processed in batches.
 
+    Uses a distributed lock so only one request analyzes at a time.
+    Concurrent requests poll progress and receive the cached result.
+
     Events:
     - {"type": "init", "tournament": {...}, "total": N}
+    - {"type": "waiting"} — sent to clients waiting for another analysis to finish
     - {"type": "progress", "processed": N, "total": N, "batch_results": {...}}
     - {"type": "complete", "summary": {...}, "stats": {...}, "elapsed_seconds": N}
     - {"type": "error", "message": "..."}
@@ -666,158 +810,253 @@ async def analyze_tournament_stream(tag: str):
     members_list = tournament_data.get("membersList", [])
     tournament_status = tournament_data.get("status", "")
     tournament_name = tournament_data.get("name", "Unknown")
+    total = len(members_list)
 
-    async def generate():
-        start_time = time.time()
+    tournament_info = {
+        "tag": tournament_data.get("tag"),
+        "name": tournament_name,
+        "status": tournament_status,
+        "capacity": tournament_data.get("capacity"),
+        "maxCapacity": tournament_data.get("maxCapacity"),
+    }
 
-        tournament_info = {
-            "tag": tournament_data.get("tag"),
-            "name": tournament_name,
-            "status": tournament_status,
-            "capacity": tournament_data.get("capacity"),
-            "maxCapacity": tournament_data.get("maxCapacity"),
-        }
+    # Check tournament-level result cache first
+    cached_result = await get_cached_tournament_result(tag)
+    if cached_result:
+        print(f"[Tournament Cache] HIT for {tag} — returning instantly")
 
-        total = len(members_list)
+        async def generate_cached():
+            yield json.dumps({
+                "type": "init",
+                "tournament": tournament_info,
+                "total": total,
+            }) + "\n"
+            yield json.dumps({
+                "type": "complete",
+                "summary": cached_result["summary"],
+                "stats": cached_result["stats"],
+                "elapsed_seconds": 0,
+                "_from_tournament_cache": True,
+            }) + "\n"
 
-        # Send init event
-        yield json.dumps({
-            "type": "init",
-            "tournament": tournament_info,
-            "total": total,
-        }) + "\n"
+        return StreamingResponse(
+            generate_cached(),
+            media_type="text/plain",
+            headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-cache"},
+        )
 
-        # Extract all player tags
-        all_tags = []
-        tag_to_member = {}
-        for member in members_list:
-            ptag = member.get("tag", "")
-            if ptag:
-                if not ptag.startswith("#"):
-                    ptag = "#" + ptag
-                all_tags.append(ptag)
-                tag_to_member[ptag] = member
+    # Try to acquire the analysis lock
+    lock_acquired = await try_acquire_lock(tag)
 
-        # Check KV cache for all players (batched internally)
-        cached_players = await get_cached_players(all_tags)
+    if lock_acquired:
+        # === ANALYZER PATH: we perform the actual analysis ===
+        async def generate_analysis():
+            start_time = time.time()
+            try:
+                yield json.dumps({
+                    "type": "init",
+                    "tournament": tournament_info,
+                    "total": total,
+                }) + "\n"
 
-        # Aggregate tier counts
-        tier_counts = {
-            "top_1k": 0, "top_10k": 0, "top_50k": 0,
-            "ever_ranked": 0, "final_league": 0, "reached_12k": 0,
-            "trophy_10k_12k": 0, "casual": 0, "beginner": 0,
-        }
+                # Extract all player tags
+                all_tags = []
+                tag_to_member = {}
+                for member in members_list:
+                    ptag = member.get("tag", "")
+                    if ptag:
+                        if not ptag.startswith("#"):
+                            ptag = "#" + ptag
+                        all_tags.append(ptag)
+                        tag_to_member[ptag] = member
 
-        successful = 0
-        errors_count = 0
-        cache_hits = len(cached_players)
-        api_fetches = 0
+                # Check KV cache for all players (batched internally)
+                cached_players = await get_cached_players(all_tags)
 
-        # Process cached players
-        for ptag, cached_data in cached_players.items():
-            classification = cached_data.get("classification", {})
-            if classification and classification.get("tier"):
-                tier_counts[classification["tier"]] += 1
-                successful += 1
+                tier_counts = {
+                    "top_1k": 0, "top_10k": 0, "top_50k": 0,
+                    "ever_ranked": 0, "final_league": 0, "reached_12k": 0,
+                    "trophy_10k_12k": 0, "casual": 0, "beginner": 0,
+                }
 
-        # Find uncached players
-        tags_to_fetch = [t for t in all_tags if t not in cached_players]
+                successful = 0
+                errors_count = 0
+                cache_hits = len(cached_players)
+                api_fetches = 0
 
-        # Send progress after cache check
-        yield json.dumps({
-            "type": "progress",
-            "processed": successful,
-            "total": total,
-            "from_cache": cache_hits,
-            "from_api": 0,
-            "batch_summary": _build_summary(tier_counts, successful),
-        }) + "\n"
-
-        # Process ALL uncached players at once - semaphore controls concurrency,
-        # no need for sequential batches. Stream progress every STREAM_BATCH_SIZE completions.
-        if tags_to_fetch:
-            async with httpx.AsyncClient() as client:
-                rate_limiter = _RateLimiter(50)
-                pending_cache = []
-                completed_since_last_update = 0
-
-                async def fetch_paced(ptag):
-                    await rate_limiter.acquire()
-                    return await fetch_player_from_api(client, ptag, None)
-
-                # Launch ALL tasks at once - rate limiter paces to 50/s
-                all_tasks = [fetch_paced(t) for t in tags_to_fetch]
-
-                for coro in asyncio.as_completed(all_tasks):
-                    ptag, player_data, error, _ = await coro
-                    completed_since_last_update += 1
-
-                    if error:
-                        errors_count += 1
-                    elif player_data:
-                        api_fetches += 1
-                        classification = classify_player(player_data)
+                # Process cached players
+                for ptag, cached_data in cached_players.items():
+                    classification = cached_data.get("classification", {})
+                    if classification and classification.get("tier"):
                         tier_counts[classification["tier"]] += 1
                         successful += 1
 
-                        pending_cache.append({
-                            "tag": ptag,
-                            "name": player_data.get("name", ""),
-                            "classification": classification,
-                        })
+                tags_to_fetch = [t for t in all_tags if t not in cached_players]
 
-                    # Stream progress & flush cache every STREAM_BATCH_SIZE completions
-                    if completed_since_last_update >= STREAM_BATCH_SIZE:
+                # Send initial progress after cache check
+                current_summary = _build_summary(tier_counts, successful)
+                yield json.dumps({
+                    "type": "progress",
+                    "processed": successful,
+                    "total": total,
+                    "from_cache": cache_hits,
+                    "from_api": 0,
+                    "batch_summary": current_summary,
+                }) + "\n"
+
+                # Share progress with waiters
+                await update_analysis_progress(tag, successful + cache_hits, total, current_summary)
+
+                # Fetch uncached players
+                if tags_to_fetch:
+                    async with httpx.AsyncClient() as client:
+                        rate_limiter = _RateLimiter(50)
+                        pending_cache = []
                         completed_since_last_update = 0
+
+                        async def fetch_paced(ptag):
+                            await rate_limiter.acquire()
+                            return await fetch_player_from_api(client, ptag, None)
+
+                        all_tasks = [fetch_paced(t) for t in tags_to_fetch]
+
+                        for coro in asyncio.as_completed(all_tasks):
+                            ptag, player_data, error, _ = await coro
+                            completed_since_last_update += 1
+
+                            if error:
+                                errors_count += 1
+                            elif player_data:
+                                api_fetches += 1
+                                classification = classify_player(player_data)
+                                tier_counts[classification["tier"]] += 1
+                                successful += 1
+
+                                pending_cache.append({
+                                    "tag": ptag,
+                                    "name": player_data.get("name", ""),
+                                    "classification": classification,
+                                })
+
+                            if completed_since_last_update >= STREAM_BATCH_SIZE:
+                                completed_since_last_update = 0
+
+                                if pending_cache:
+                                    await cache_players(pending_cache)
+                                    pending_cache = []
+
+                                current_summary = _build_summary(tier_counts, successful)
+                                processed_total = successful + errors_count + cache_hits
+
+                                yield json.dumps({
+                                    "type": "progress",
+                                    "processed": processed_total,
+                                    "total": total,
+                                    "from_cache": cache_hits,
+                                    "from_api": api_fetches,
+                                    "batch_summary": current_summary,
+                                }) + "\n"
+
+                                # Share progress with waiters
+                                await update_analysis_progress(tag, processed_total, total, current_summary)
 
                         if pending_cache:
                             await cache_players(pending_cache)
-                            pending_cache = []
 
-                        yield json.dumps({
-                            "type": "progress",
-                            "processed": successful + errors_count + cache_hits,
-                            "total": total,
-                            "from_cache": cache_hits,
-                            "from_api": api_fetches,
-                            "batch_summary": _build_summary(tier_counts, successful),
-                        }) + "\n"
+                elapsed = time.time() - start_time
 
-                # Flush remaining cache entries
-                if pending_cache:
-                    await cache_players(pending_cache)
+                await add_recent_tournament(
+                    tag=tag, name=tournament_name,
+                    player_count=total, status=tournament_status,
+                )
 
-        elapsed = time.time() - start_time
+                final_summary = _build_summary(tier_counts, successful)
+                final_stats = {
+                    "total": total,
+                    "successful": successful,
+                    "errors": errors_count,
+                    "from_cache": cache_hits,
+                    "from_api": api_fetches,
+                    "cache_enabled": KV_ENABLED,
+                }
 
-        # Add to recent tournaments
-        await add_recent_tournament(
-            tag=tag, name=tournament_name,
-            player_count=total, status=tournament_status,
+                # Cache the tournament result for other users
+                await cache_tournament_result(tag, {
+                    "summary": final_summary,
+                    "stats": final_stats,
+                    "elapsed_seconds": round(elapsed, 1),
+                }, tournament_status)
+
+                yield json.dumps({
+                    "type": "complete",
+                    "summary": final_summary,
+                    "stats": final_stats,
+                    "elapsed_seconds": round(elapsed, 1),
+                }) + "\n"
+
+            finally:
+                await release_lock(tag)
+                await clear_analysis_progress(tag)
+
+        return StreamingResponse(
+            generate_analysis(),
+            media_type="text/plain",
+            headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-cache"},
         )
 
-        # Send complete event
-        yield json.dumps({
-            "type": "complete",
-            "summary": _build_summary(tier_counts, successful),
-            "stats": {
+    else:
+        # === WAITER PATH: another request is already analyzing ===
+        async def generate_waiting():
+            yield json.dumps({
+                "type": "init",
+                "tournament": tournament_info,
                 "total": total,
-                "successful": successful,
-                "errors": errors_count,
-                "from_cache": cache_hits,
-                "from_api": api_fetches,
-                "cache_enabled": KV_ENABLED,
-            },
-            "elapsed_seconds": round(elapsed, 1),
-        }) + "\n"
+            }) + "\n"
 
-    return StreamingResponse(
-        generate(),
-        media_type="text/plain",
-        headers={
-            "X-Content-Type-Options": "nosniff",
-            "Cache-Control": "no-cache",
-        },
-    )
+            yield json.dumps({"type": "waiting"}) + "\n"
+
+            wait_start = time.time()
+            max_wait = 280  # seconds — just under Vercel's 300s limit
+
+            while time.time() - wait_start < max_wait:
+                await asyncio.sleep(2)
+
+                # Check if result is now cached (analysis finished)
+                result = await get_cached_tournament_result(tag)
+                if result:
+                    print(f"[Tournament Wait] Result available for {tag}")
+                    yield json.dumps({
+                        "type": "complete",
+                        "summary": result["summary"],
+                        "stats": result["stats"],
+                        "elapsed_seconds": result.get("elapsed_seconds", 0),
+                        "_from_tournament_cache": True,
+                    }) + "\n"
+                    return
+
+                # Relay progress from the analyzer
+                progress = await get_analysis_progress(tag)
+                if progress:
+                    yield json.dumps({
+                        "type": "progress",
+                        "processed": progress["processed"],
+                        "total": progress["total"],
+                        "from_cache": 0,
+                        "from_api": 0,
+                        "batch_summary": progress.get("summary", {}),
+                    }) + "\n"
+
+            # Timed out waiting — tell client to retry
+            yield json.dumps({
+                "type": "error",
+                "message": "L'analyse est toujours en cours. Réessayez dans quelques instants.",
+            }) + "\n"
+
+        return StreamingResponse(
+            generate_waiting(),
+            media_type="text/plain",
+            headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-cache"},
+        )
 
 
 def _build_summary(tier_counts: dict, successful: int) -> dict:
