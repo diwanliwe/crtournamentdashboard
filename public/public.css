@@ -659,17 +659,17 @@ body {
 .tier-stats {
     display: flex;
     gap: 0.5rem;
-    width: 85px;
+    width: 100px;
     justify-content: flex-end;
     flex-shrink: 0;
-    margin-left: 1rem;
+    margin-left: 0.75rem;
 }
 
 .tier-count {
     font-weight: bold;
     font-size: 0.9rem;
     color: var(--text-dark);
-    width: 35px;
+    width: 45px;
     text-align: right;
 }
 
@@ -920,14 +920,14 @@ body {
     }
     
     .tier-stats {
-        width: 75px;
-        margin-left: 0.75rem;
+        width: 90px;
+        margin-left: 0.5rem;
     }
-    
+
     .tier-count {
-        width: 30px;
+        width: 40px;
     }
-    
+
     .tier-percent {
         width: 40px;
     }

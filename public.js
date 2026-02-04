@@ -351,8 +351,7 @@ async function loadTournamentDirect(tag) {
     } catch (error) {
         console.error('Direct load error:', error);
         resetSearch();
-        tagInput.value = `#${cleanTag}`;
-        showHint(error.message || 'Une erreur est survenue', true);
+        showHint('Ce tournoi n\'existe pas', true);
     } finally {
         isSearching = false;
     }
