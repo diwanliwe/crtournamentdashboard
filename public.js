@@ -29,6 +29,7 @@ const TIPS = [
 ];
 
 const TIP_ROTATION_INTERVAL = 6000; // 6 seconds
+const LARGE_TOURNAMENT_THRESHOLD = 1000; // Use streaming for tournaments with more players
 
 // ===========================================
 // DOM Elements
@@ -219,34 +220,164 @@ async function handleSearch() {
         // Step 1: Find tournament
         showHint('Recherche du tournoi...', false, true);
         const cleanTag = tag.replace(/^#/, '');
-        
+
         const tournamentResponse = await fetch(`/api/tournament/${cleanTag}`);
         const tournamentData = await tournamentResponse.json();
-        
+
         if (!tournamentResponse.ok) {
             throw new Error(tournamentData.detail || 'Tournoi non trouvé');
         }
-        
-        // Step 2: Analyze players
-        showHint(`Tournoi trouvé ! Analyse de ${tournamentData.membersList} joueurs...`, false, true);
-        
-        const analyzeResponse = await fetch(`/api/tournament/${cleanTag}/analyze`);
-        const analyzeData = await analyzeResponse.json();
-        
-        if (!analyzeResponse.ok) {
-            throw new Error(analyzeData.detail || 'Erreur lors de l\'analyse');
+
+        // Step 2: Choose analysis method based on tournament size
+        if (tournamentData.membersList > LARGE_TOURNAMENT_THRESHOLD) {
+            // Large tournament: use streaming endpoint with progress
+            await handleStreamingAnalysis(cleanTag, tournamentData);
+        } else {
+            // Normal tournament: use standard endpoint
+            showHint(`Tournoi trouvé ! Analyse de ${tournamentData.membersList} joueurs...`, false, true);
+
+            const analyzeResponse = await fetch(`/api/tournament/${cleanTag}/analyze`);
+            const analyzeData = await analyzeResponse.json();
+
+            if (!analyzeResponse.ok) {
+                throw new Error(analyzeData.detail || 'Erreur lors de l\'analyse');
+            }
+
+            showHint('');
+            displayResults(tournamentData, analyzeData);
         }
-        
-        // Step 3: Display results
-        showHint('');
-        displayResults(tournamentData, analyzeData);
-        
+
     } catch (error) {
         console.error('Search error:', error);
         showHint(error.message || 'Une erreur est survenue', true);
     } finally {
         isSearching = false;
         setSearchingState(false);
+    }
+}
+
+function updateStreamingFooter(processed, total) {
+    // Text stays centered; dots are absolutely positioned outside the text flow
+    panelFooter.innerHTML = `<span class="streaming-footer-wrap">Analyse en cours : ${processed}/${total} joueurs<span class="dots-animation"></span></span>`;
+}
+
+async function handleStreamingAnalysis(cleanTag, tournamentData) {
+    showHint(`Tournoi trouvé ! Analyse de ${tournamentData.membersList} joueurs...`, false, true);
+
+    const response = await fetch(`/api/tournament/${cleanTag}/analyze-stream`);
+
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Erreur serveur: ${response.status}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let lastEvent = null;
+    let streamComplete = false;
+    let streamTotal = tournamentData.membersList;
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // Process complete NDJSON lines
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // Keep incomplete line in buffer
+
+        for (const line of lines) {
+            if (!line.trim()) continue;
+
+            try {
+                const event = JSON.parse(line);
+                lastEvent = event;
+
+                if (event.type === 'init') {
+                    streamTotal = event.total;
+                    showHint(
+                        `Analyse en cours : 0/${streamTotal} joueurs...`,
+                        false, true
+                    );
+                    // Show results section early with tournament header + animated footer
+                    showStreamingResultsHeader(tournamentData);
+                    updateStreamingFooter(0, streamTotal);
+                } else if (event.type === 'progress') {
+                    const pct = Math.round((event.processed / event.total) * 100);
+                    showHint(
+                        `Analyse en cours : ${event.processed}/${event.total} joueurs (${pct}%)...`,
+                        false, true
+                    );
+                    // Update footer counter
+                    updateStreamingFooter(event.processed, event.total);
+                    // Update tier bars only when we have actual data
+                    if (event.batch_summary) {
+                        const hasData = Object.values(event.batch_summary).some(t => t.count > 0);
+                        if (hasData) {
+                            displayTierDistribution({ summary: event.batch_summary });
+                        }
+                    }
+                } else if (event.type === 'complete') {
+                    streamComplete = true;
+                    showHint('');
+
+                    // Build analyzeData in same format as standard endpoint
+                    const analyzeData = {
+                        analysis: {
+                            summary: event.summary,
+                            stats: event.stats,
+                        },
+                        elapsed_seconds: event.elapsed_seconds,
+                    };
+                    displayResults(tournamentData, analyzeData);
+
+                    // Log cache stats
+                    const stats = event.stats;
+                    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+                    console.log(`📊 Analysis (streaming): ${tournamentData.name}`);
+                    console.log(`⏱️  Time: ${event.elapsed_seconds}s`);
+                    console.log(`👥 Players: ${stats.successful}/${stats.total}`);
+                    if (stats.cache_enabled) {
+                        console.log(`💾 FROM CACHE: ${stats.from_cache} players`);
+                        console.log(`🌐 FROM API: ${stats.from_api} players`);
+                        const cachePercent = stats.successful > 0
+                            ? Math.round(stats.from_cache / stats.successful * 100) : 0;
+                        console.log(`📈 Cache hit rate: ${cachePercent}%`);
+                    }
+                    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+                } else if (event.type === 'error') {
+                    throw new Error(event.message || 'Erreur serveur');
+                }
+            } catch (parseErr) {
+                if (parseErr.message && !parseErr.message.includes('JSON')) {
+                    throw parseErr;
+                }
+                console.warn('Skipping malformed stream line:', line);
+            }
+        }
+    }
+
+    // If stream ended without a complete event, show partial results
+    if (!streamComplete && lastEvent && lastEvent.type === 'progress') {
+        console.warn('Stream ended prematurely, showing partial results');
+        showHint('');
+        const analyzeData = {
+            analysis: {
+                summary: lastEvent.batch_summary,
+                stats: {
+                    total: lastEvent.total,
+                    successful: lastEvent.processed,
+                    errors: lastEvent.total - lastEvent.processed,
+                    from_cache: lastEvent.from_cache,
+                    from_api: lastEvent.from_api,
+                    cache_enabled: true,
+                },
+            },
+            elapsed_seconds: 0,
+        };
+        displayResults(tournamentData, analyzeData);
     }
 }
 
@@ -296,6 +427,28 @@ function resetSearch() {
 // ===========================================
 // Results Display
 // ===========================================
+
+function showStreamingResultsHeader(tournament) {
+    // Set up results header early so tier bars can update during streaming
+    const cleanTag = tagInput.value.trim().replace(/^#/, '');
+    headerTag.textContent = `#${cleanTag.toUpperCase()}`;
+    headerTag.style.display = 'block';
+    headerTitle.textContent = tournament.name || 'Tournoi';
+    headerTitle.classList.add('tournament-name');
+    headerSubtitle.style.display = 'block';
+    headerProgress.classList.remove('active');
+    headerSubtitle.textContent = formatStatus(tournament.status);
+    playerBarText.textContent = `Joueurs : ${tournament.membersList}/${tournament.maxCapacity}`;
+    appContainer.classList.add('results-mode');
+    analysisTime.textContent = '...';
+    panelFooter.innerHTML = '<span>Analyse en cours...</span>';
+    tierList.innerHTML = '<div class="tier-row"><div class="tier-label" style="opacity:0.6">Chargement des joueurs...</div></div>';
+    document.querySelector('.tip-footer').style.display = 'none';
+    resultsSection.style.display = 'block';
+    setTimeout(() => {
+        resultsSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }, 100);
+}
 
 function displayResults(tournament, analysis) {
     // Update header with tournament info (like in-game)
@@ -541,17 +694,12 @@ function openInfoModal() {
         posthog.capture('info_button_clicked');
         console.log('[PostHog] Event captured: info_button_clicked');
     }
-}
-
-function closeInfoModal() {
+}function closeInfoModal() {
     infoModal.classList.remove('active');
     document.body.style.overflow = ''; // Restore scroll
-}
-
-// Close modal with Escape key
+}// Close modal with Escape key
 document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && infoModal.classList.contains('active')) {
         closeInfoModal();
     }
 });
-

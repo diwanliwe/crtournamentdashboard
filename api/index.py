@@ -6,6 +6,7 @@ from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
@@ -43,30 +44,35 @@ def get_player_cache_key(tag: str) -> str:
     return f"player:{tag}"
 
 
+KV_BATCH_SIZE = 500  # Max keys per MGET/pipeline batch (avoids Upstash payload limits)
+
+
 async def get_cached_players(tags: list[str]) -> dict:
     """
     Get multiple players from KV cache.
     Returns dict of {tag: classification_data} for found players.
+    Batches MGET in chunks of KV_BATCH_SIZE to handle 10K+ players.
     """
     if not KV_ENABLED or not tags:
         return {}
-    
+
     try:
-        # Build cache keys
-        keys = [get_player_cache_key(tag) for tag in tags]
-        
-        # MGET all keys at once (1 command for many keys)
-        results = kv.mget(*keys)
-        
         cached = {}
-        for i, result in enumerate(results):
-            if result is not None:
-                # Parse JSON if it's a string
-                if isinstance(result, str):
-                    cached[tags[i]] = json.loads(result)
-                else:
-                    cached[tags[i]] = result
-        
+
+        # Process in batches to avoid Upstash payload limits
+        for i in range(0, len(tags), KV_BATCH_SIZE):
+            batch_tags = tags[i:i + KV_BATCH_SIZE]
+            keys = [get_player_cache_key(tag) for tag in batch_tags]
+
+            results = kv.mget(*keys)
+
+            for j, result in enumerate(results):
+                if result is not None:
+                    if isinstance(result, str):
+                        cached[batch_tags[j]] = json.loads(result)
+                    else:
+                        cached[batch_tags[j]] = result
+
         return cached
     except Exception as e:
         print(f"[KV Cache] Error getting players: {e}")
@@ -77,27 +83,29 @@ async def cache_players(players_data: list[dict]):
     """
     Cache multiple players to KV.
     Each player_data should have 'tag' and 'classification' keys.
+    Batches pipeline operations in chunks of KV_BATCH_SIZE for 10K+ players.
     """
     if not KV_ENABLED or not players_data:
         return
-    
+
     try:
-        # Use pipeline for batch set with TTL
-        pipe = kv.pipeline()
-        
-        for player in players_data:
-            tag = player.get("tag", "")
-            if tag:
-                key = get_player_cache_key(tag)
-                # Store classification + metadata
-                data = {
-                    "name": player.get("name", ""),
-                    "classification": player.get("classification", {}),
-                    "cached_at": datetime.now().isoformat()
-                }
-                pipe.setex(key, PLAYER_KV_TTL, json.dumps(data))
-        
-        pipe.exec()
+        # Process in batches to avoid Upstash payload limits
+        for i in range(0, len(players_data), KV_BATCH_SIZE):
+            batch = players_data[i:i + KV_BATCH_SIZE]
+            pipe = kv.pipeline()
+
+            for player in batch:
+                tag = player.get("tag", "")
+                if tag:
+                    key = get_player_cache_key(tag)
+                    data = {
+                        "name": player.get("name", ""),
+                        "classification": player.get("classification", {}),
+                        "cached_at": datetime.now().isoformat()
+                    }
+                    pipe.setex(key, PLAYER_KV_TTL, json.dumps(data))
+
+            pipe.exec()
     except Exception as e:
         print(f"[KV Cache] Error caching players: {e}")
 
@@ -297,31 +305,28 @@ def classify_player(player_data):
 async def fetch_player_from_api(client: httpx.AsyncClient, tag: str, base_url: str = None):
     """
     Fetch a single player from API. Returns (tag, data, error, was_cached).
-    If base_url is provided, fetches through our cached endpoint.
-    Otherwise, fetches directly from CR API.
+    Does NOT retry on 429 - callers handle retries so they can release
+    the semaphore during waits.
     """
     if not tag.startswith("#"):
         tag = "#" + tag
-    
+
     encoded_tag = quote(tag, safe="")
     try:
         if base_url:
-            # Fetch through our cached endpoint (hits Vercel edge cache)
             response = await client.get(
                 f"{base_url}/api/player/{encoded_tag}",
                 timeout=15.0
             )
         else:
-            # Direct API call (no caching)
             response = await client.get(
                 f"{CR_API_BASE}/players/{encoded_tag}",
                 headers=get_headers(),
                 timeout=15.0
             )
-        
+
         if response.status_code == 200:
             data = response.json()
-            # Check if response came from cache (Vercel adds x-vercel-cache header)
             was_cached = response.headers.get("x-vercel-cache") == "HIT"
             if "_cachedAt" not in data:
                 data["_cachedAt"] = datetime.now().isoformat()
@@ -329,9 +334,7 @@ async def fetch_player_from_api(client: httpx.AsyncClient, tag: str, base_url: s
         elif response.status_code == 404:
             return (tag, None, "Player not found", False)
         elif response.status_code == 429:
-            # Rate limited - wait and retry once
-            await asyncio.sleep(2)
-            return await fetch_player_from_api(client, tag, base_url)
+            return (tag, None, "Rate limited (429)", False)
         else:
             return (tag, None, f"API error: {response.status_code}", False)
     except httpx.TimeoutException:
@@ -341,6 +344,24 @@ async def fetch_player_from_api(client: httpx.AsyncClient, tag: str, base_url: s
 
 
 import asyncio
+
+
+class _RateLimiter:
+    """Paces async requests to a max rate per second to avoid 429s."""
+
+    def __init__(self, per_second: float):
+        self._interval = 1.0 / per_second
+        self._last = 0.0
+        self._lock = asyncio.Lock()
+
+    async def acquire(self):
+        async with self._lock:
+            now = time.time()
+            wait = self._last + self._interval - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last = time.time()
+
 
 # Get the base URL for internal API calls (for caching)
 def get_vercel_url():
@@ -439,14 +460,14 @@ async def analyze_tournament_players(members_list):
     
     if tags_to_fetch:
         async with httpx.AsyncClient() as client:
-            semaphore = asyncio.Semaphore(30)
-            
-            async def fetch_with_semaphore(tag):
-                async with semaphore:
-                    return await fetch_player_from_api(client, tag, None)
-            
-            tasks = [fetch_with_semaphore(tag) for tag in tags_to_fetch]
-            
+            rate_limiter = _RateLimiter(50)
+
+            async def fetch_paced(ptag):
+                await rate_limiter.acquire()
+                return await fetch_player_from_api(client, ptag, None)
+
+            tasks = [fetch_paced(tag) for tag in tags_to_fetch]
+
             for coro in asyncio.as_completed(tasks):
                 tag, player_data, error, _ = await coro
                 
@@ -538,13 +559,13 @@ async def analyze_tournament(tag: str, response: Response):
         tag = "#" + tag
     encoded_tag = quote(tag, safe="")
 
-    # First, fetch the tournament to get members list
+    # First, fetch the tournament to get members list (longer timeout for 10K tournaments)
     async with httpx.AsyncClient() as client:
         try:
             api_response = await client.get(
                 f"{CR_API_BASE}/tournaments/{encoded_tag}",
                 headers=get_headers(),
-                timeout=10.0
+                timeout=30.0
             )
             
             if api_response.status_code != 200:
@@ -599,6 +620,215 @@ async def analyze_tournament(tag: str, response: Response):
         "_cached_at": datetime.now().isoformat(),
         "_cache_duration_seconds": cache_duration,
     }
+
+
+STREAM_BATCH_SIZE = 500  # Players per batch in streaming analysis
+
+
+@app.get("/api/tournament/{tag:path}/analyze-stream")
+async def analyze_tournament_stream(tag: str):
+    """
+    Streaming analysis for large tournaments (1K+ players).
+    Streams NDJSON events as players are processed in batches.
+
+    Events:
+    - {"type": "init", "tournament": {...}, "total": N}
+    - {"type": "progress", "processed": N, "total": N, "batch_results": {...}}
+    - {"type": "complete", "summary": {...}, "stats": {...}, "elapsed_seconds": N}
+    - {"type": "error", "message": "..."}
+    """
+    if not API_KEY:
+        raise HTTPException(status_code=500, detail="API key not configured")
+
+    if not tag.startswith("#"):
+        tag = "#" + tag
+    encoded_tag = quote(tag, safe="")
+
+    # Fetch tournament data first (before streaming)
+    async with httpx.AsyncClient() as client:
+        try:
+            api_response = await client.get(
+                f"{CR_API_BASE}/tournaments/{encoded_tag}",
+                headers=get_headers(),
+                timeout=30.0
+            )
+
+            if api_response.status_code != 200:
+                raise HTTPException(
+                    status_code=api_response.status_code,
+                    detail=f"Tournament API error: {api_response.status_code}"
+                )
+
+            tournament_data = api_response.json()
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=500, detail=f"Failed to fetch tournament: {e}")
+
+    members_list = tournament_data.get("membersList", [])
+    tournament_status = tournament_data.get("status", "")
+    tournament_name = tournament_data.get("name", "Unknown")
+
+    async def generate():
+        start_time = time.time()
+
+        tournament_info = {
+            "tag": tournament_data.get("tag"),
+            "name": tournament_name,
+            "status": tournament_status,
+            "capacity": tournament_data.get("capacity"),
+            "maxCapacity": tournament_data.get("maxCapacity"),
+        }
+
+        total = len(members_list)
+
+        # Send init event
+        yield json.dumps({
+            "type": "init",
+            "tournament": tournament_info,
+            "total": total,
+        }) + "\n"
+
+        # Extract all player tags
+        all_tags = []
+        tag_to_member = {}
+        for member in members_list:
+            ptag = member.get("tag", "")
+            if ptag:
+                if not ptag.startswith("#"):
+                    ptag = "#" + ptag
+                all_tags.append(ptag)
+                tag_to_member[ptag] = member
+
+        # Check KV cache for all players (batched internally)
+        cached_players = await get_cached_players(all_tags)
+
+        # Aggregate tier counts
+        tier_counts = {
+            "top_1k": 0, "top_10k": 0, "top_50k": 0,
+            "ever_ranked": 0, "final_league": 0, "reached_12k": 0,
+            "trophy_10k_12k": 0, "casual": 0, "beginner": 0,
+        }
+
+        successful = 0
+        errors_count = 0
+        cache_hits = len(cached_players)
+        api_fetches = 0
+
+        # Process cached players
+        for ptag, cached_data in cached_players.items():
+            classification = cached_data.get("classification", {})
+            if classification and classification.get("tier"):
+                tier_counts[classification["tier"]] += 1
+                successful += 1
+
+        # Find uncached players
+        tags_to_fetch = [t for t in all_tags if t not in cached_players]
+
+        # Send progress after cache check
+        yield json.dumps({
+            "type": "progress",
+            "processed": successful,
+            "total": total,
+            "from_cache": cache_hits,
+            "from_api": 0,
+            "batch_summary": _build_summary(tier_counts, successful),
+        }) + "\n"
+
+        # Process ALL uncached players at once - semaphore controls concurrency,
+        # no need for sequential batches. Stream progress every STREAM_BATCH_SIZE completions.
+        if tags_to_fetch:
+            async with httpx.AsyncClient() as client:
+                rate_limiter = _RateLimiter(50)
+                pending_cache = []
+                completed_since_last_update = 0
+
+                async def fetch_paced(ptag):
+                    await rate_limiter.acquire()
+                    return await fetch_player_from_api(client, ptag, None)
+
+                # Launch ALL tasks at once - rate limiter paces to 50/s
+                all_tasks = [fetch_paced(t) for t in tags_to_fetch]
+
+                for coro in asyncio.as_completed(all_tasks):
+                    ptag, player_data, error, _ = await coro
+                    completed_since_last_update += 1
+
+                    if error:
+                        errors_count += 1
+                    elif player_data:
+                        api_fetches += 1
+                        classification = classify_player(player_data)
+                        tier_counts[classification["tier"]] += 1
+                        successful += 1
+
+                        pending_cache.append({
+                            "tag": ptag,
+                            "name": player_data.get("name", ""),
+                            "classification": classification,
+                        })
+
+                    # Stream progress & flush cache every STREAM_BATCH_SIZE completions
+                    if completed_since_last_update >= STREAM_BATCH_SIZE:
+                        completed_since_last_update = 0
+
+                        if pending_cache:
+                            await cache_players(pending_cache)
+                            pending_cache = []
+
+                        yield json.dumps({
+                            "type": "progress",
+                            "processed": successful + errors_count + cache_hits,
+                            "total": total,
+                            "from_cache": cache_hits,
+                            "from_api": api_fetches,
+                            "batch_summary": _build_summary(tier_counts, successful),
+                        }) + "\n"
+
+                # Flush remaining cache entries
+                if pending_cache:
+                    await cache_players(pending_cache)
+
+        elapsed = time.time() - start_time
+
+        # Add to recent tournaments
+        await add_recent_tournament(
+            tag=tag, name=tournament_name,
+            player_count=total, status=tournament_status,
+        )
+
+        # Send complete event
+        yield json.dumps({
+            "type": "complete",
+            "summary": _build_summary(tier_counts, successful),
+            "stats": {
+                "total": total,
+                "successful": successful,
+                "errors": errors_count,
+                "from_cache": cache_hits,
+                "from_api": api_fetches,
+                "cache_enabled": KV_ENABLED,
+            },
+            "elapsed_seconds": round(elapsed, 1),
+        }) + "\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/plain",
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
+def _build_summary(tier_counts: dict, successful: int) -> dict:
+    """Build tier summary with counts and percentages."""
+    summary = {}
+    for tier, count in tier_counts.items():
+        summary[tier] = {
+            "count": count,
+            "percent": round(count / successful * 100, 1) if successful > 0 else 0
+        }
+    return summary
 
 
 @app.get("/api/tournament/{tag:path}/full")
