@@ -805,6 +805,24 @@ body {
     opacity: 0;
 }
 
+/* Skeleton loading state */
+@keyframes skeleton-shimmer {
+    0%, 100% { opacity: 0.3; }
+    50% { opacity: 0.1; }
+}
+
+.skeleton-el {
+    background: rgba(0, 0, 0, 0.12);
+    animation: skeleton-shimmer 1.5s ease-in-out infinite;
+}
+
+.skeleton-text {
+    display: inline-block;
+    height: 12px;
+    width: 60%;
+    border-radius: 3px;
+}
+
 /* Loading State */
 .loading-spinner {
     display: inline-block;

@@ -97,9 +97,24 @@ document.addEventListener('DOMContentLoaded', () => {
     showRandomTip();
     tipInterval = setInterval(rotateTip, TIP_ROTATION_INTERVAL);
     
+    // Handle browser back/forward
+    window.addEventListener('popstate', (e) => {
+        if (e.state && e.state.tag) {
+            loadTournamentDirect(e.state.tag);
+        } else {
+            resetSearch();
+        }
+    });
+
+    // Auto-load tournament from URL path (e.g., /L2YP8Y00)
+    const pathTag = window.location.pathname.slice(1);
+    if (pathTag && /^[A-Za-z0-9]+$/.test(pathTag)) {
+        loadTournamentDirect(pathTag);
+    }
+
     // Load recent tournaments
     loadRecentTournaments();
-    
+
     // Focus input on load
     tagInput.focus();
 });
@@ -221,6 +236,14 @@ async function handleSearch() {
         showHint('Recherche du tournoi...', false, true);
         const cleanTag = tag.replace(/^#/, '');
 
+        // Update URL to reflect the tournament being analyzed
+        const targetPath = `/${cleanTag}`;
+        if (window.location.pathname !== targetPath) {
+            history.pushState({ tag: cleanTag }, '', targetPath);
+        } else {
+            history.replaceState({ tag: cleanTag }, '', targetPath);
+        }
+
         const tournamentResponse = await fetch(`/api/tournament/${cleanTag}`);
         const tournamentData = await tournamentResponse.json();
 
@@ -253,6 +276,85 @@ async function handleSearch() {
     } finally {
         isSearching = false;
         setSearchingState(false);
+    }
+}
+
+async function loadTournamentDirect(tag) {
+    if (isSearching) return;
+
+    const cleanTag = tag.replace(/^#/, '');
+    tagInput.value = `#${cleanTag}`;
+
+    // Attach state to current URL entry
+    history.replaceState({ tag: cleanTag }, '', `/${cleanTag}`);
+
+    isSearching = true;
+
+    // Immediately enter results mode with loading state
+    appContainer.classList.add('results-mode');
+    headerTag.textContent = `#${cleanTag.toUpperCase()}`;
+    headerTag.style.display = 'block';
+    headerTitle.textContent = 'Chargement...';
+    headerTitle.classList.add('tournament-name');
+    headerSubtitle.style.display = 'none';
+    headerProgress.classList.remove('active');
+    playerBarText.textContent = '';
+    analysisTime.textContent = '';
+    panelFooter.innerHTML = '<span class="streaming-footer-wrap">Chargement<span class="dots-animation"></span></span>';
+
+    // Skeleton loading bars that preview the tier layout
+    const skeletonWidths = [60, 42, 32, 22, 16, 12, 8];
+    tierList.innerHTML = skeletonWidths.map(w => `
+        <div class="tier-row">
+            <div class="tier-color skeleton-el"></div>
+            <div class="tier-label"><span class="skeleton-el skeleton-text"></span></div>
+            <div class="tier-bar-container">
+                <div class="tier-bar skeleton-el" style="width: ${w}%;"></div>
+            </div>
+            <div class="tier-stats">
+                <span class="skeleton-el skeleton-text" style="width: 25px;"></span>
+                <span class="skeleton-el skeleton-text" style="width: 35px;"></span>
+            </div>
+        </div>
+    `).join('');
+    document.querySelector('.tip-footer').style.display = 'none';
+    resultsSection.style.display = 'block';
+
+    try {
+        const tournamentResponse = await fetch(`/api/tournament/${cleanTag}`);
+        const tournamentData = await tournamentResponse.json();
+
+        if (!tournamentResponse.ok) {
+            throw new Error(tournamentData.detail || 'Tournoi non trouvé');
+        }
+
+        // Update header with real tournament info
+        headerTitle.textContent = tournamentData.name || 'Tournoi';
+        headerSubtitle.style.display = 'block';
+        headerSubtitle.textContent = formatStatus(tournamentData.status);
+        playerBarText.textContent = `Joueurs : ${tournamentData.membersList}/${tournamentData.maxCapacity}`;
+
+        if (tournamentData.membersList > LARGE_TOURNAMENT_THRESHOLD) {
+            await handleStreamingAnalysis(cleanTag, tournamentData);
+        } else {
+            panelFooter.innerHTML = '<span class="streaming-footer-wrap">Analyse en cours<span class="dots-animation"></span></span>';
+
+            const analyzeResponse = await fetch(`/api/tournament/${cleanTag}/analyze`);
+            const analyzeData = await analyzeResponse.json();
+
+            if (!analyzeResponse.ok) {
+                throw new Error(analyzeData.detail || 'Erreur lors de l\'analyse');
+            }
+
+            displayResults(tournamentData, analyzeData);
+        }
+    } catch (error) {
+        console.error('Direct load error:', error);
+        resetSearch();
+        tagInput.value = `#${cleanTag}`;
+        showHint(error.message || 'Une erreur est survenue', true);
+    } finally {
+        isSearching = false;
     }
 }
 
@@ -398,6 +500,10 @@ function hideResults() {
 }
 
 function resetSearch() {
+    // Reset URL to root
+    if (window.location.pathname !== '/') {
+        history.pushState({}, '', '/');
+    }
     hideResults();
     tagInput.value = '';
     tagInput.focus();
